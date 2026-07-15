@@ -1,0 +1,8 @@
+# The executed, self-contained notebook (embedded figures) IS committed as the
+# scrollable deliverable. The .py remains the jupytext source of truth.
+
+# WPTO hindcast request cache
+*.pkl
+
+__pycache__/
+.DS_Store
