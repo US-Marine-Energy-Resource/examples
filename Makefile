@@ -3,7 +3,7 @@ NOTEBOOK := us_doe_h2o_wave_hindcast_resource_characterization.ipynb
 
 .DEFAULT_GOAL := help
 
-.PHONY: help compile run analysis execute clean
+.PHONY: help compile run analysis render execute clean
 
 help: ## Show this help message.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z_%-]+:.*##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -17,8 +17,10 @@ run: compile ## Compile and open the Jupyter notebook.
 analysis: ## Run the Python analysis script directly.
 	uv run $(SCRIPT)
 
-execute: compile ## Compile and execute the notebook in place without opening Jupyter.
+render: compile ## Compile and execute the notebook in place so committed cells include outputs.
 	uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace $(NOTEBOOK)
+
+execute: render ## Alias for render.
 
 clean: ## Remove generated notebook checkpoints and Python caches.
 	rm -rf .ipynb_checkpoints __pycache__
