@@ -1,8 +1,21 @@
-# The executed, self-contained notebook (embedded figures) IS committed as the
-# scrollable deliverable. The .py remains the jupytext source of truth.
+# The rendered, self-contained notebook (embedded figures) IS committed as the
+# scrollable deliverable, alongside the Typst PDF. The .qmd is the Quarto source
+# of truth.
 
 # Hindcast request cache
 *.pkl
+
+# uv-managed environment
+.venv/
+
+# Quarto caches and intermediates
+.quarto/
+*_files/
+*.quarto_ipynb
+
+# Rendered document HTML is a dev/preview artifact (the .ipynb and .pdf are the
+# committed deliverables). Scoped to the repo root so figures/*.html is unaffected.
+/*.html
 
 __pycache__/
 .DS_Store
