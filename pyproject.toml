@@ -1,0 +1,25 @@
+[project]
+name = "us-marine-energy-resource-examples"
+version = "0.1.0"
+description = "Python examples demonstating U.S marine energy resource analysis using open source data "
+requires-python = ">=3.10"
+dependencies = [
+    "mhkit[wave]==1.1.*",
+    "folium",
+    "scikit-learn",
+    "seaborn",
+    # Rendering toolchain: Quarto uses Jupyter.
+    "jupyter",
+    "ipykernel",
+]
+
+# Do not create an installable package.
+[tool.uv]
+package = false
+
+[tool.ruff.lint]
+# Never auto-remove "imported but unused" imports (F401). Quarto splits code across
+# chunks/sections, so an import defined in one chunk but only used in a later one
+# looks unused to the fixer and would otherwise be deleted on `--fix` /
+# format-on-save. Ruff still flags F401 — it just won't delete the import.
+unfixable = ["F401"]
