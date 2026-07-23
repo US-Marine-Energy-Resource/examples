@@ -27,9 +27,11 @@ WORK_DIR = Path("/kaggle/working") if ON_KAGGLE else Path(".")
 
 # The companion Kaggle Dataset ships `cache/` (derived results), `mer_wave_cache/`
 # (the warmed us-marine-energy-resource download cache), and `h2o_examples/` (these
-# helpers). Locate it by looking for the package.
-KAGGLE_ASSETS = next(Path("/kaggle/input").glob("*/h2o_examples"), None) if ON_KAGGLE else None
-KAGGLE_ASSETS = KAGGLE_ASSETS.parent if KAGGLE_ASSETS else None
+# helpers). Locate it by looking for the package. Kaggle mounts datasets a few
+# levels deep (e.g. /kaggle/input/datasets/<user>/<slug>/), so search recursively
+# rather than assuming a fixed */h2o_examples depth.
+_pkg = next(Path("/kaggle/input").rglob("h2o_examples/__init__.py"), None) if ON_KAGGLE else None
+KAGGLE_ASSETS = _pkg.parent.parent if _pkg else None
 
 if ON_KAGGLE:
     # Select the existing `dynamic` preset -- live Folium map, interactive tables.

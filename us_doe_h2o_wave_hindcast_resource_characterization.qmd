@@ -43,14 +43,24 @@ paths) lives in `h2o_examples/environment.py`; figure and table helpers live in
 installs dependencies before numpy/pandas are imported.
 
 ```{python}
+import os
 import sys
 from pathlib import Path
 
 # On Kaggle the h2o_examples helpers ship in the companion dataset; make them
-# importable before anything else.
-_assets = next(Path("/kaggle/input").glob("*/h2o_examples"), None)
-if _assets:
-    sys.path.insert(0, str(_assets.parent))
+# importable before anything else. Kaggle mounts datasets a few levels deep
+# (e.g. /kaggle/input/datasets/<user>/<slug>/), so search recursively rather
+# than assuming */h2o_examples.
+_pkg = next(Path("/kaggle/input").rglob("h2o_examples/__init__.py"), None)
+if _pkg is not None:
+    sys.path.insert(0, str(_pkg.parent.parent))
+elif os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
+    _listing = sorted(str(p) for p in Path("/kaggle/input").rglob("*"))
+    raise RuntimeError(
+        "h2o_examples not found under /kaggle/input -- is the "
+        "h2o-wave-hindcast-cache dataset attached? /kaggle/input contains:\n"
+        + "\n".join(_listing[:80])
+    )
 
 from h2o_examples.environment import CACHE_DIR
 ```
