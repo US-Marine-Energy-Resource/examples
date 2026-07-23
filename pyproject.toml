@@ -6,7 +6,6 @@ requires-python = ">=3.10"
 dependencies = [
     "mhkit[wave]==1.1.*",
     "folium",
-    "scikit-learn",
     "seaborn",
     # Interactive DataTables in the HTML/notebook outputs; gated off for the PDF.
     "itables",
