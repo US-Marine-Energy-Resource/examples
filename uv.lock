@@ -5292,8 +5292,6 @@ dependencies = [
     { name = "itables" },
     { name = "jupyter" },
     { name = "mhkit", extra = ["wave"] },
-    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "seaborn" },
     { name = "us-marine-energy-resource" },
 ]
@@ -5305,7 +5303,6 @@ requires-dist = [
     { name = "itables" },
     { name = "jupyter" },
     { name = "mhkit", extras = ["wave"], specifier = "==1.1.*" },
-    { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "us-marine-energy-resource", specifier = ">=0.5.0" },
 ]
