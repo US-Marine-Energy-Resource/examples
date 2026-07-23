@@ -1,15 +1,12 @@
 """Wave energy test sites: coordinates, provenance, and map/link helpers.
 
 Everything about the sites that is not a bare lat/lon pair lives here -- the
-published PacWave corner coordinates and their sources, the folium map builders,
-and the Marine Energy Atlas deep links -- so the notebook can present a clean
+published PacWave corner coordinates and their sources, and the folium map
+builders -- so the notebook can present a clean
 name/coordinate table and leave the bookkeeping to this module.
 """
 
 import html
-import json
-
-from urllib.parse import urlencode
 
 import folium
 import numpy as np
@@ -263,23 +260,3 @@ def add_site_bounds(site_map, site):
         fill_opacity=0.18,
         tooltip=folium.Tooltip(site["label"], permanent=False),
     ).add_to(site_map)
-
-
-# NREL Marine Energy Atlas deep links. The viewer's URL carries no per-point
-# parameter -- clicking a marker only rewrites the `b` viewport bounds -- so the
-# best available link is a bounding box drawn tightly around the site, which opens
-# the map zoomed onto it. `vL` selects the displayed layer and is copied from the
-# viewer; change it to link against a different layer.
-ATLAS_URL = "https://maps.nrel.gov/marine-energy-atlas/data-viewer/data-library/layers"
-ATLAS_LAYER = "68c955d8b12e9eb9d3c3fc55"
-# Half-extents of the framing box, in degrees. ~2.2:1 to match the viewer's aspect.
-ATLAS_HALF_LAT, ATLAS_HALF_LNG = 0.045, 0.10
-
-
-def atlas_url(site, layer=ATLAS_LAYER):
-    bounds = [
-        [round(site["lng"] - ATLAS_HALF_LNG, 6), round(site["lat"] - ATLAS_HALF_LAT, 6)],
-        [round(site["lng"] + ATLAS_HALF_LNG, 6), round(site["lat"] + ATLAS_HALF_LAT, 6)],
-    ]
-    query = urlencode({"vL": layer, "b": json.dumps(bounds, separators=(",", ":"))})
-    return f"{ATLAS_URL}?{query}"
