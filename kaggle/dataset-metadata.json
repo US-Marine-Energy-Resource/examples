@@ -1,0 +1,11 @@
+{
+  "title": "H2O Wave Hindcast Resource Characterization Cache",
+  "id": "andrewsimmsnlr/h2o-wave-hindcast-cache",
+  "licenses": [
+    {
+      "name": "CC0-1.0"
+    }
+  ],
+  "subtitle": "Warmed sea-state cache for the DOE H2O wave hindcast notebook",
+  "description": "Companion dataset for the U.S. DOE H2O Wave Hindcast resource characterization notebook.\n\nContents:\n\n- `mer_wave_cache/` - the us-marine-energy-resource package's download cache: 3-hour bulk-parameter sea-state records (Hm0, Te, J, Dir, Tp) for eight U.S. marine energy test sites over 2016-2020, fetched from the public `wpto-pds-us-wave` bucket on AWS S3. The notebook copies it to a writable directory and points MER_WAVE_CACHE_DIR at it.\n- `cache/` - derived results: precomputed environmental contours, site depths and representative-extreme fits. These exist purely so the notebook runs in minutes instead of hours.\n- `h2o_examples/` - the small mapping and site-definition helpers the notebook imports.\n\nSource data: WPTO U.S. Wave Hindcast, produced by the U.S. Department of Energy Water Power Technologies Office and distributed as an AWS Open Data registry dataset (`s3://wpto-pds-us-wave`). U.S. Government work, public domain.\n\nThe notebook re-fetches anything missing via the us-marine-energy-resource package (pip install us-marine-energy-resource), so this dataset is an accelerator, not a requirement."
+}

@@ -1,0 +1,21 @@
+{
+  "name": "us-marine-energy-resource examples",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/rocker-org/devcontainer-features/quarto-cli:1": {}
+  },
+  // uv builds .venv from pyproject.toml/uv.lock; `make sync` also registers the
+  // Jupyter kernel the notebook uses. Wave-hindcast queries read S3 anonymously,
+  // so no credentials are needed; for the NLR API backend add
+  // NLR_DEVELOPER_API_KEY and NLR_DEVELOPER_EMAIL as Codespaces secrets.
+  "postCreateCommand": "pipx install uv && make sync",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "quarto.quarto"
+      ]
+    }
+  }
+}

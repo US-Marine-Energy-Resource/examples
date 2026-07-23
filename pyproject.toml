@@ -8,9 +8,14 @@ dependencies = [
     "folium",
     "scikit-learn",
     "seaborn",
+    # Interactive DataTables in the HTML/notebook outputs; gated off for the PDF.
+    "itables",
     # Rendering toolchain: Quarto uses Jupyter.
     "jupyter",
     "ipykernel",
+    # Wave hindcast queries: nearest-node lookup, point downloads (S3 or NLR API),
+    # on-disk caching, and the `mer` CLI.
+    "us-marine-energy-resource>=0.5.0",
 ]
 
 # Do not create an installable package.

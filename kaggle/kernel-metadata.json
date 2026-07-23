@@ -1,0 +1,17 @@
+{
+  "id": "andrewsimmsnlr/h2o-wave-hindcast-resource-characterization",
+  "title": "H2O Wave Hindcast Resource Characterization",
+  "code_file": "us_doe_h2o_wave_hindcast_resource_characterization.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "andrewsimmsnlr/h2o-wave-hindcast-cache"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

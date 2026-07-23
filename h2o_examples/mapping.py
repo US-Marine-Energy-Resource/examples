@@ -68,7 +68,9 @@ def map_render_context(
         }
         if preset not in presets:
             expected = ", ".join(sorted(presets))
-            raise ValueError(f"Unknown map render context {context!r}; expected one of: {expected}")
+            raise ValueError(
+                f"Unknown map render context {context!r}; expected one of: {expected}"
+            )
         return presets[preset]
 
     return MapRenderContext(**dict(context))
@@ -115,7 +117,9 @@ def render_map_outputs(
 
     if "png" in outputs:
         if png_renderer is None:
-            raise ValueError("A png_renderer is required when the render context includes 'png'.")
+            raise ValueError(
+                "A png_renderer is required when the render context includes 'png'."
+            )
         png_path = output_path / f"{stem}.png"
         png_renderer(png_path, render_context)
         artifacts["png"] = png_path
@@ -221,7 +225,9 @@ def lonlat_to_web_mercator(lon: float, lat: float) -> tuple[float, float]:
     return x, y
 
 
-def _display_outputs(folium_map: Any, artifacts: Mapping[str, Path], outputs: set[str]) -> None:
+def _display_outputs(
+    folium_map: Any, artifacts: Mapping[str, Path], outputs: set[str]
+) -> None:
     try:
         from IPython.display import Image, display
     except ImportError:
@@ -233,7 +239,9 @@ def _display_outputs(folium_map: Any, artifacts: Mapping[str, Path], outputs: se
         display(folium_map)
 
 
-def _site_lonlat_bounds(sites: Mapping[str, Mapping[str, Any]]) -> tuple[float, float, float, float]:
+def _site_lonlat_bounds(
+    sites: Mapping[str, Mapping[str, Any]],
+) -> tuple[float, float, float, float]:
     lats: list[float] = []
     lons: list[float] = []
     for site in sites.values():
@@ -280,7 +288,10 @@ def _choose_zoom(
 
     for zoom in range(max_zoom, min_zoom - 1, -1):
         scale = 256 * (2**zoom)
-        if x_fraction_at_max * scale <= width_px and y_fraction_at_max * scale <= height_px:
+        if (
+            x_fraction_at_max * scale <= width_px
+            and y_fraction_at_max * scale <= height_px
+        ):
             return zoom
     return min_zoom
 
@@ -308,14 +319,18 @@ def _draw_tiles(
         for y in range(max(0, y_min), min(max_index, y_max) + 1):
             image = _fetch_tile(tile_url, zoom, wrapped_x, y, timeout, ssl_context)
             left, bottom, right, top = _tile_bounds_web_mercator(x, y, zoom)
-            ax.imshow(image, extent=(left, right, bottom, top), origin="upper", zorder=0)
+            ax.imshow(
+                image, extent=(left, right, bottom, top), origin="upper", zorder=0
+            )
 
 
 def _draw_site_vectors(ax: plt.Axes, sites: Mapping[str, Mapping[str, Any]]) -> None:
     for site in sites.values():
         color = site.get("color", "#2563eb")
         if "corners" in site:
-            polygon = [_project_corner(corner) for corner in _ordered_corners(site["corners"])]
+            polygon = [
+                _project_corner(corner) for corner in _ordered_corners(site["corners"])
+            ]
             polygon.append(polygon[0])
             xs, ys = zip(*polygon)
             ax.fill(xs, ys, color=color, alpha=0.18, zorder=4)
@@ -344,11 +359,17 @@ def _draw_site_vectors(ax: plt.Axes, sites: Mapping[str, Mapping[str, Any]]) -> 
             color="#111827",
             zorder=7,
         )
-        text.set_path_effects([path_effects.withStroke(linewidth=3, foreground="white")])
+        text.set_path_effects(
+            [path_effects.withStroke(linewidth=3, foreground="white")]
+        )
 
 
-def _ordered_corners(corners: Mapping[str, Mapping[str, float]]) -> list[Mapping[str, float]]:
-    ordered = sorted(corners.values(), key=lambda corner: float(corner["lat"]), reverse=True)
+def _ordered_corners(
+    corners: Mapping[str, Mapping[str, float]],
+) -> list[Mapping[str, float]]:
+    ordered = sorted(
+        corners.values(), key=lambda corner: float(corner["lat"]), reverse=True
+    )
     north = sorted(ordered[:2], key=lambda corner: float(corner["lng"]))
     south = sorted(ordered[2:], key=lambda corner: float(corner["lng"]), reverse=True)
     return [*north, *south]
@@ -372,7 +393,9 @@ def _fetch_tile(
         headers={"User-Agent": "us-marine-energy-resource-examples/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=ssl_context) as response:
+        with urllib.request.urlopen(
+            request, timeout=timeout, context=ssl_context
+        ) as response:
             return mpimg.imread(io.BytesIO(response.read()), format="png")
     except Exception as exc:
         raise MapTileFetchError(
@@ -396,7 +419,9 @@ def _lat_to_tile_float(lat: float, zoom: int) -> float:
     )
 
 
-def _tile_bounds_web_mercator(x: int, y: int, zoom: int) -> tuple[float, float, float, float]:
+def _tile_bounds_web_mercator(
+    x: int, y: int, zoom: int
+) -> tuple[float, float, float, float]:
     west = _tile_x_to_lon(x, zoom)
     east = _tile_x_to_lon(x + 1, zoom)
     north = _tile_y_to_lat(y, zoom)

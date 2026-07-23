@@ -2,16 +2,21 @@
 # scrollable deliverable, alongside the Typst PDF. The .qmd is the Quarto source
 # of truth.
 
-# Hindcast request cache
+# Derived-result cache (.cache/) pickles
 *.pkl
+
+# NLR API credentials (see .env.example). Never commit a populated .env.
+.env
 
 # uv-managed environment
 .venv/
 
-# Quarto caches and intermediates
+# Quarto caches and intermediates. The trailing * matters: a render that is
+# interrupted (or run while another is in flight) leaves numbered siblings like
+# `*.quarto_ipynb_17`, which a bare `*.quarto_ipynb` pattern does not match.
 .quarto/
 *_files/
-*.quarto_ipynb
+*.quarto_ipynb*
 
 # Rendered document HTML is a dev/preview artifact (the .ipynb and .pdf are the
 # committed deliverables). Scoped to the repo root so figures/*.html is unaffected.
