@@ -1,9 +1,15 @@
 ---
 title: "U.S. DOE H2O Wave Hindcast"
 subtitle: "Open-Source Data Resource Characterization Example"
+number-sections: true
+bibliography: references.bib
+# Include every references.bib entry in the reference list, cited or not.
+nocite: |
+  @*
 format:
   html:
     toc: true
+    toc-depth: 3
     theme: cosmo
     embed-resources: true
   ipynb: default
@@ -12,61 +18,41 @@ format:
     margin:
       x: 0.75in
     toc: true
+    toc-depth: 3
 execute:
   echo: true
   warning: false
 jupyter: python3
 ---
 
-This examples shows how to use open source H2O hindcast resource characterization data from a single 
-marine energy site and perform a high level wave energy resource analysis.
+This document characterizes the wave energy resource at U.S. marine energy test
+sites using the U.S. DOE WPTO High-Resolution Wave Hindcast. Data access goes
+through the
+[`us-marine-energy-resource`](https://pypi.org/project/us-marine-energy-resource/)
+package, which finds the hindcast grid node nearest a coordinate and downloads its
+record. The analysis covers aggregate statistics, monthly climatology, joint
+probability, extreme sea states, exceedance, directionality, and a multi-site
+comparison, using [MHKiT](https://mhkit-software.github.io/MHKiT/) for the wave
+calculations.
 
 # Setup
 
+Platform bootstrap (Kaggle detection, dependency install, cache seeding, output
+paths) lives in `h2o_examples/environment.py`; figure and table helpers live in
+`h2o_examples/figures.py`. Importing `environment` first matters: on Kaggle it
+installs dependencies before numpy/pandas are imported.
+
 ```{python}
-# --- Platform bootstrap --------------------------------------------------------
-# Runs first, before numpy/pandas are imported, because installing mhkit on Kaggle
-# can move those versions and an already-imported module would go stale. On a
-# developer machine every branch below is a no-op.
-import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-ON_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle/working").is_dir()
+# On Kaggle the h2o_examples helpers ship in the companion dataset; make them
+# importable before anything else.
+_assets = next(Path("/kaggle/input").glob("*/h2o_examples"), None)
+if _assets:
+    sys.path.insert(0, str(_assets.parent))
 
-# Everything the document writes hangs off WORK_DIR. Locally `Path(".") / "figures"`
-# is `figures`, so local behaviour is unchanged.
-WORK_DIR = Path("/kaggle/working") if ON_KAGGLE else Path(".")
-
-# The companion Kaggle Dataset ships `cache/` (derived results), `mer_wave_cache/`
-# (the warmed us-marine-energy-resource download cache), and `h2o_examples/` (the
-# mapping and sites helpers). Locate it by looking for the package.
-KAGGLE_ASSETS = next(Path("/kaggle/input").glob("*/h2o_examples"), None) if ON_KAGGLE else None
-KAGGLE_ASSETS = KAGGLE_ASSETS.parent if KAGGLE_ASSETS else None
-
-if ON_KAGGLE:
-    # Select the existing `dynamic` preset -- live Folium map, interactive tables.
-    # setdefault, never assignment: `make render-pdf` sets =png and must win.
-    os.environ.setdefault("H2O_RENDER_CONTEXT", "dynamic")
-    # No -U: Kaggle's numpy/pandas/scipy already satisfy mhkit's floors and
-    # should be left alone.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q",
-         "mhkit[wave]==1.1.*", "itables", "folium",
-         "us-marine-energy-resource>=0.5.0"],
-        check=True,
-    )
-    if KAGGLE_ASSETS:
-        sys.path.insert(0, str(KAGGLE_ASSETS))
-        # Seed the wave-download cache from the dataset. Copy rather than point at
-        # it: /kaggle/input is read-only and fetches write back into the cache.
-        seeded = KAGGLE_ASSETS / "mer_wave_cache"
-        if seeded.is_dir():
-            target = Path("/kaggle/working/.mer_wave_cache")
-            shutil.copytree(seeded, target, dirs_exist_ok=True)
-            os.environ["MER_WAVE_CACHE_DIR"] = str(target)
+from h2o_examples.environment import CACHE_DIR
 ```
 
 ```{python}
@@ -77,113 +63,34 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from matplotlib.ticker import MultipleLocator
-from sklearn.mixture import GaussianMixture
-
-from mhkit.wave import contours, graphics, performance, resource
+from mhkit.wave import contours, graphics, performance
 from us_marine_energy_resource import wave_hindcast
 from us_marine_energy_resource.wave_hindcast.errors import InvalidAttributeError
 
+from h2o_examples.cache import memoize_pickle
+from h2o_examples.figures import FIG_DIR, FIG_WIDTH, plot_wave_matrix, savefig, show_table
 from h2o_examples.mapping import render_sites_map_outputs
-from h2o_examples.sites import WAVE_ENERGY_TEST_SITES, atlas_url, make_sites_map, site_lat_lng
-
-
-# Interactive DataTables everywhere except the Typst/PDF path, which cannot show
-# them: the Makefile sets H2O_RENDER_CONTEXT=png for the PDF and =dynamic for the
-# HTML and notebook. `show_table` renders an itables widget when interactive and a
-# plain text table otherwise, so every output format shows *something* readable.
-INTERACTIVE_TABLES = os.environ.get("H2O_RENDER_CONTEXT", "default") != "png"
-if INTERACTIVE_TABLES:
-    from itables import init_notebook_mode
-    from itables import show as _show_interactive
-    # itables defaults to connected=False, which embeds the DataTables JS rather
-    # than fetching it from a CDN -- already the right behaviour everywhere, Kaggle
-    # included. Do not pass connected=True: it makes every render wait on a CDN.
-    init_notebook_mode(all_interactive=False)
-
-
-def show_table(df, **kwargs):
-    """Interactive itables view in HTML/notebook, static text in the PDF."""
-    if INTERACTIVE_TABLES:
-        _show_interactive(df, **kwargs)
-    else:
-        print(df.to_string())
+from h2o_examples.sites import WAVE_ENERGY_TEST_SITES, make_sites_map, site_lat_lng
 ```
 
-## Figure Setup
+# Wave Energy Test Sites {#sec-sites}
+
+The sites live in `h2o_examples/sites.py`, which holds their names, coordinates,
+the published PacWave corner provenance, and the folium map helpers. This document
+works from a name and a `latitude, longitude` pair.
 
 ```{python}
-
-sns.set_theme()
-
-# Save every figure to figures/<name>.png AND render inline.
-# In a notebook plt.show()  draws inline;
-# As a script (Agg) show() does not execute but the PNG is still written.
-# `figures/*.png` is tracked with git-LFS (see .gitattributes) to keep the repo light.
-
-FIG_DIR = WORK_DIR / "figures"
-FIG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def savefig(name):
-    plt.gcf().savefig(FIG_DIR / f"{name}.png", dpi=150, bbox_inches="tight")
-    plt.show()
-
-
-def plot_wave_matrix(matrix, zlabel, figsize=(8, 8), fmt=".2f", buffer=1):
-    """Heatmap of a sea-state matrix (Te on columns, Hm0 on the index).
-
-    Empty bins are blanked and the axes are cropped to the populated bins plus a
-    one-bin `buffer` on each side. Light minor gridlines fall on the bin edges.
-    Adapted from the EMEC/PacWave proficiency-testing capture-matrix plot.
-    """
-    m = matrix.replace(0, np.nan)
-
-    # Crop to populated bins + a one-bin buffer, dropping the empty low-Te block.
-    rows = np.where(m.notna().any(axis=1))[0]
-    cols = np.where(m.notna().any(axis=0))[0]
-    r0, r1 = max(rows.min() - buffer, 0), min(rows.max() + buffer, m.shape[0] - 1)
-    c0, c1 = max(cols.min() - buffer, 0), min(cols.max() + buffer, m.shape[1] - 1)
-    m = m.iloc[r0 : r1 + 1, c0 : c1 + 1].sort_index(ascending=False)  # Hm0 up
-
-    plt.figure(figsize=figsize)
-    ax = sns.heatmap(
-        m, annot=True, fmt=fmt, cmap="viridis", cbar_kws={"label": zlabel}
-    )
-    # Minor ticks sit on the bin edges (between the centered cells) -> grid there.
-    ax.grid(False)
-    ax.minorticks_on()
-    ax.xaxis.set_minor_locator(MultipleLocator(1.0))
-    ax.yaxis.set_minor_locator(MultipleLocator(1.0))
-    ax.grid(which="minor", color="#dddddd", linewidth=0.6)
-    ax.set_xlabel("Energy Period, $T_e$ [s]")
-    ax.set_ylabel("Significant Wave Height, $H_{m0}$ [m]")
-    plt.tight_layout()
-    return ax
+_ = render_sites_map_outputs(WAVE_ENERGY_TEST_SITES, make_sites_map, output_dir=FIG_DIR)
 ```
 
-# Wave Energy Test Sites
-
-The sites themselves -- names, coordinates, the published PacWave corner
-provenance, and the folium/Atlas map helpers -- live in `h2o_examples/sites.py`.
-This document works from a name and a `latitude, longitude` pair; everything else
-about a site stays in that module.
-
-### Test Sites Map
+Every site as a lat/lon pair (@tbl-site-coordinates). For the two PacWave sites
+this is the centerpoint computed from the published corners. The `Domain` column
+is resolved from the coordinates by `wave_hindcast.describe_point`, an offline
+lookup against the hindcast's grid-node index. It needs no download and no API key.
 
 ```{python}
-render_sites_map_outputs(WAVE_ENERGY_TEST_SITES, make_sites_map, output_dir=FIG_DIR)
-sites_map = make_sites_map(WAVE_ENERGY_TEST_SITES)
-```
-
-### Test Site Coordinates
-
-Every point plotted above, as a lat/lon pair. For the two PacWave sites this is the
-centerpoint computed from the published corners, not a corner itself. The `Domain`
-column is resolved from the coordinates by `wave_hindcast.describe_point`, an
-offline lookup against the hindcast's grid-node index -- no download, no API key.
-
-```{python}
+#| label: tbl-site-coordinates
+#| tbl-cap: "Wave energy test sites and their hindcast domains"
 site_coordinates = pd.DataFrame(
     [
         {
@@ -192,13 +99,6 @@ site_coordinates = pd.DataFrame(
             "Domain": wave_hindcast.describe_point(*site_lat_lng(site))["domain"],
             "Latitude": site["lat"],
             "Longitude": site["lng"],
-            # The static/PDF path prints the frame as text, where an anchor tag
-            # would be noise; show the bare URL there instead.
-            "Atlas": (
-                f'<a href="{atlas_url(site)}" target="_blank">map</a>'
-                if INTERACTIVE_TABLES
-                else atlas_url(site)
-            ),
         }
         for name, site in WAVE_ENERGY_TEST_SITES.items()
     ]
@@ -206,35 +106,28 @@ site_coordinates = pd.DataFrame(
 show_table(site_coordinates)
 ```
 
-Copy-paste form -- site name on one line, `latitude, longitude` on the next:
+# Downloading Data {#sec-downloading}
 
-```{python}
-for name, site in WAVE_ENERGY_TEST_SITES.items():
-    print(name)
-    print(f"{site['lat']}, {site['lng']}")
-```
+We read the 3-hour bulk-parameter hindcast [@MHKDR_Dataset_326] through
+`wave_hindcast.get_data_at_point(lat, lon, ...)`, which finds the hindcast grid
+node nearest a coordinate and returns its record as a DataFrame. One query per
+site feeds every deliverable below, `mean_wave_direction` included.
 
-## Downloading Data
+## Backends
 
-We read the **3-hour bulk-parameter hindcast** through the
-[`us-marine-energy-resource`](https://pypi.org/project/us-marine-energy-resource/)
-package: `wave_hindcast.get_data_at_point(lat, lon, ...)` finds the hindcast grid node
-nearest a coordinate and returns its record as a DataFrame. One query per site feeds
-every deliverable below, `mean_wave_direction` included.
+The dataset is large behind the scenes, with six domains, 42 years, and roughly
+80 GB of `.h5` per domain-year, so query only the years and variables you need.
+Two backends serve the data and the package picks between them by request size.
+The S3 backend reads the published files anonymously (free, no key, no request
+limits, but raw file access that downloads slowly at volume). The NLR API backend
+builds an archive server side (free API key required, suited to large pulls).
+Every query in this document is small enough to stay on S3, and every fetch is
+cached on disk under `~/.mer_wave_cache`, so repeat renders read from disk.
 
-The dataset is very large behind the scenes — six domains, 42 years, and roughly 80 GB
-of `.h5` per domain-year — so **query only the years and variables you need**. Two
-backends serve the data and the package picks between them by request size: the **S3
-backend** reads the published files anonymously (free, no key, no request limits, but
-raw file access that downloads slowly at volume), and the **NLR API backend** builds an
-archive server side (free API key required, suited to large pulls). Every query in this
-document is small enough to stay on S3, and every fetch is cached on disk under
-`~/.mer_wave_cache`, so repeat renders read from disk.
+## The same query from the command line
 
-### The same query from the command line
-
-The package installs a CLI. `--info` resolves the nearest grid node offline — no
-download, no key:
+The package installs a CLI. `--info` resolves the nearest grid node offline, with
+no download and no key:
 
 ```{python}
 # The `mer` executable lives next to the Python interpreter running this document.
@@ -242,8 +135,8 @@ MER = Path(sys.executable).parent / "mer"
 !{MER} wave 44.5670,-124.2290 --info
 ```
 
-A download looks like this — shown rather than run, because the Python cells below
-fetch the same data through the API (add `--dry-run` to see the plan without
+A download looks like this. It is shown rather than run, because the Python cells
+below fetch the same data through the API (add `--dry-run` to see the plan without
 downloading):
 
 ```bash
@@ -251,12 +144,19 @@ mer wave 44.5670,-124.2290 --years 2020 \
     --variables significant_wave_height,energy_period,omni-directional_wave_power,mean_wave_direction,peak_period
 ```
 
-### The Python query
+## The Python query
 
 ```{python}
 SELECTED_SITE = "US_Oregon_PacWave_South"
 YEAR = 2020  # the newest published year, served by the S3 backend in every domain
 lat_lon = site_lat_lng(WAVE_ENERGY_TEST_SITES[SELECTED_SITE])
+
+# Single source for the site's identity in prose. Quarto renders these inline in
+# the narrative below (e.g. `{python} SITE_LABEL`). Figure captions name the site
+# literally, because Quarto does not evaluate inline code inside a `fig-cap`; if
+# you change SELECTED_SITE, update the single-site captions to match.
+SITE_LABEL = WAVE_ENERGY_TEST_SITES[SELECTED_SITE]["label"]
+SITE_COORDS = f"{lat_lon[0]:.4f}, {lat_lon[1]:.4f}"
 ```
 
 ```{python}
@@ -280,18 +180,6 @@ COLUMN_NAMES = {
 
 # Sentinel written into the data for timesteps the model did not produce.
 FILL_VALUE = -9.0
-
-# Derived results (contour fits, representative extremes) cache here. The raw
-# sea-state downloads live in the package's own cache (~/.mer_wave_cache, or
-# MER_WAVE_CACHE_DIR where the bootstrap set it).
-CACHE_DIR = WORK_DIR / ".cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Seed from the companion Kaggle Dataset. Copy rather than read through it:
-# `contour` below writes its results back, and /kaggle/input is read-only, so
-# every miss would raise PermissionError.
-if KAGGLE_ASSETS and (KAGGLE_ASSETS / "cache").is_dir():
-    shutil.copytree(KAGGLE_ASSETS / "cache", CACHE_DIR, dirs_exist_ok=True)
 ```
 
 ```{python}
@@ -335,7 +223,7 @@ def load_site(name, years=(YEAR,)):
     attrs = dict(df.attrs)
     # Columns come back Title Cased in the requested order; use the short names.
     df.columns = list(COLUMN_NAMES.values())
-    # Gulf files write -9.0 into timesteps the model skipped (see below).
+    # Drop rows at the fill sentinel (-9 or -999), see the note below.
     df = df[(df > FILL_VALUE + 0.1).all(axis=1)]
     df["J"] = df["J"] / 1000.0  # W/m -> kW/m
     df = df.astype("float64")
@@ -343,43 +231,34 @@ def load_site(name, years=(YEAR,)):
     return df
 
 
+def record_hours(df):
+    """Hours the record covers: sea states times the sampling interval."""
+    return len(df) * (df.index[1] - df.index[0]).total_seconds() / 3600
+
+
 data = load_site(SELECTED_SITE)
-hindcast_domain = data.attrs["domain"]
 ```
 
-### Gaps are filled with `-9`, not `NaN`
+::: {.callout-note}
+## Missing data is a fill value, not `NaN`
 
-The Gulf of Mexico / Puerto Rico files mark timesteps the model never produced by
-writing `-9.0` into every variable — a sentinel, not a measurement, with no
-`_FillValue` attribute or mask to say so. Left in place, those impossible sea states
-stretch joint-probability bins and pull hardest on the extreme-value tails Section 4
-fits to; the package returns the values as published, so `load_site` drops any row at
-the fill value. Only the Gulf domain has such gaps. The general lesson travels further
-than this dataset: **when a gridded product encodes "no data" as an in-range number,
-an unmasked read fails silently rather than loudly** — check for a fill sentinel
-before trusting any summary statistic.
+Timesteps the model never produced are written as an in-range sentinel (`-9` or
+`-999`), not `NaN`, so an unmasked read biases every statistic silently.
+`load_site` drops any row at or below the sentinel:
 
-### Direction conventions
+```python
+df = df[(df > FILL_VALUE + 0.1).all(axis=1)]
+```
+:::
 
-Directions come back in the meteorological convention — degrees clockwise from north,
-the direction waves arrive *from* — for every domain: the published S3 files already
-use it, and the package applies the one correction that exists (Hawaii's API CSVs)
-automatically, with `describe_point()["direction_transform"]` recording whether it
-did. An earlier version of this example inherited a $-90°$ rotation written against a
-different product (the 1-hour virtual buoy); it is not applied here, and the raw
-3-hour directions at PacWave South are consistent with the WNW prevailing direction in
-the site's published specification. Anyone depending on absolute direction should
-still confirm the convention against a co-located measured buoy. Directionality drives
-Section 7 only.
+# Exploring the Downloaded Data {#sec-exploring}
 
-## Exploring the Downloaded Data
+## Metadata
 
-### Metadata
-
-Every fetch carries its metadata on `DataFrame.attrs`: the resolved grid node, its
-true position, the units per variable, and the source that served it.
-`describe_point` reports the same node resolution offline, plus the served year span
-and the node's distance from the requested coordinate.
+Every fetch carries its metadata on `DataFrame.attrs`: the resolved grid node,
+its true position, the units per variable, and the source that served it.
+`describe_point` reports the same node resolution offline, plus the served year
+span and the node's distance from the requested coordinate.
 
 ```{python}
 info = wave_hindcast.describe_point(*lat_lon)
@@ -407,23 +286,26 @@ metadata = pd.Series(
 print(metadata.to_string())
 ```
 
-### Data Preview
+## Data Preview
 
 ```{python}
 print(data.head().to_string())
 ```
 
-## 1. Aggregate Statistics (percentile)
+# Aggregate Statistics {#sec-aggregate}
 
-To calculate aggregate wave energy statistics we are going to use an mhkit function in the wave
-module called `performance.statistics`. We can print the docstring of the function using
-`inspect.getdoc`
+Sections 4 through 10 characterize one site, `{python} SITE_LABEL` at
+`{python} SITE_COORDS`, read for `{python} str(YEAR)` from the
+`{python} data.attrs["source"]` backend of the WPTO hindcast. Each single-site
+figure caption repeats the site and coordinates so a figure identifies its source
+on its own.
+
+Aggregate wave energy statistics come from mhkit's `performance.statistics`; its
+docstring describes the fields.
 
 ```{python}
 print(inspect.getdoc(performance.statistics))
 ```
-
-Now we plugin in the downloaded `data` into the `performance.statistics` function
 
 ```{python}
 print(
@@ -433,18 +315,12 @@ print(
 )
 ```
 
-```{python}
-print(
-    data[["Hm0", "Te", "J"]]
-    .describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
-    .to_string()
-)
-```
+# Monthly Climatology {#sec-climatology}
 
-## 2. Monthly Climatology
-
-Box-and-whisker of the 3-hourly distribution per month, and a daily median with a
-25th to 75th percentile intraday band across the year.
+When the resource arrives is a device-performance question: the monthly cycle
+sets what a device produces season by season. The monthly distributions are in
+@fig-monthly-boxplot-hm0 through @fig-monthly-boxplot-j, and the daily structure
+in @fig-daily-climatology-hm0 through @fig-daily-climatology-j.
 
 ```{python}
 import calendar
@@ -454,106 +330,124 @@ months = np.arange(1, 13)
 month_labels = [calendar.month_abbr[m] for m in months]  # 'Jan'..'Dec'
 colors = sns.color_palette()  # default seaborn color cycle
 
-fig, axes = plt.subplots(3, 1, figsize=(8, 8))
-for i, (ax, (q, label)) in enumerate(zip(axes, QOIS.items())):
-    sns.boxplot(x=data.index.month, y=data[q], ax=ax, color=colors[i])
-    ax.set(xlabel="Month", ylabel=label)
-    ax.set_xticks(range(12))
-    ax.set_xticklabels(month_labels)
-fig.tight_layout()
-savefig("monthly_boxplot")
-```
-
-```{python}
 doy = data.index.dayofyear
 dgrp = data.groupby(doy)
 month_starts = [pd.Timestamp(YEAR, m, 1).dayofyear for m in months]
 
-fig, axes = plt.subplots(3, 1, figsize=(8, 8))
-for i, (ax, (q, label)) in enumerate(zip(axes, QOIS.items())):
+
+def qcolor(q):
+    """One fixed color per quantity, shared by every figure in this section."""
+    return colors[list(QOIS).index(q)]
+
+
+def monthly_boxplot(q):
+    """Box-and-whisker of the 3-hourly distribution of `q` per month."""
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
+    sns.boxplot(x=data.index.month, y=data[q], ax=ax, color=qcolor(q))
+    ax.set(xlabel="Month", ylabel=QOIS[q])
+    ax.set_xticks(range(12))
+    ax.set_xticklabels(month_labels)
+    fig.tight_layout()
+    savefig(f"monthly_boxplot_{q.lower()}")
+
+
+def daily_climatology(q):
+    """Daily median with a 25-75% band and a 7-day average across the year."""
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
     stats = dgrp[q].describe()
     days = stats.index
-    ax.fill_between(
-        days,
-        stats["25%"],
-        stats["75%"],
-        color=colors[i],
-        alpha=0.3,
-        label="Daily 25–75%",
-    )
-    ax.plot(days, stats["50%"], color=colors[i], label="Daily Median")
+    ax.fill_between(days, stats["25%"], stats["75%"], color=qcolor(q),
+                    alpha=0.3, label="Daily 25–75%")
+    ax.plot(days, stats["50%"], color=qcolor(q), label="Daily Median")
     roll = stats["50%"].rolling(7, center=True, min_periods=1).mean()
     ax.plot(days, roll, color="0.4", linewidth=2, label="7-day avg")
-    ax.set(xlabel="Month", ylabel=label)
+    ax.set(xlabel="Month", ylabel=QOIS[q])
     ax.margins(x=0)
     ax.set_xticks(month_starts)
     ax.set_xticklabels(month_labels)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.tight_layout()
-savefig("daily_climatology")
-```
+    fig.tight_layout()
+    savefig(f"daily_climatology_{q.lower()}")
 
-7-day moving average of the daily median, per variable.
 
-```{python}
-fig, axes = plt.subplots(3, 1, figsize=(8, 8))
-for i, (ax, (q, label)) in enumerate(zip(axes, QOIS.items())):
-    roll = dgrp[q].median().rolling(7, center=True, min_periods=1).mean()
-    ax.plot(roll.index, roll, color=colors[i], label="7-day avg")
-    ax.set(xlabel="Month", ylabel=label)
+def rolling_median(q, window):
+    """`window`-day moving average of the daily median of `q`."""
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3.2))
+    roll = dgrp[q].median().rolling(window, center=True, min_periods=1).mean()
+    ax.plot(roll.index, roll, color=qcolor(q), label=f"{window}-day avg")
+    ax.set(xlabel="Month", ylabel=QOIS[q])
     ax.margins(x=0)
     ax.set_xticks(month_starts)
     ax.set_xticklabels(month_labels)
-fig.tight_layout()
-savefig("weekly_average")
+    fig.tight_layout()
+    savefig(f"rolling_{window}d_{q.lower()}")
 ```
-
-The same average over a 30-day window. A week still tracks individual storm systems; a
-month smooths past them and leaves the seasonal signal on its own.
 
 ```{python}
-fig, axes = plt.subplots(3, 1, figsize=(8, 8))
-for i, (ax, (q, label)) in enumerate(zip(axes, QOIS.items())):
-    roll = dgrp[q].median().rolling(30, center=True, min_periods=1).mean()
-    ax.plot(roll.index, roll, color=colors[i], label="30-day avg")
-    ax.set(xlabel="Month", ylabel=label)
-    ax.margins(x=0)
-    ax.set_xticks(month_starts)
-    ax.set_xticklabels(month_labels)
-fig.tight_layout()
-savefig("monthly_average")
+#| label: fig-monthly-boxplot-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of significant wave height ($H_{m0}$)"
+monthly_boxplot("Hm0")
 ```
 
-### Monthly bars: the digestible version
+```{python}
+#| label: fig-monthly-boxplot-te
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of energy period ($T_e$)"
+monthly_boxplot("Te")
+```
 
-The plots above answer "what does the year look like?" — these answer "how much, in
-which month?" One bar per month, labeled, no reading values off an axis.
+```{python}
+#| label: fig-monthly-boxplot-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of omnidirectional wave energy flux ($J$)"
+monthly_boxplot("J")
+```
 
-Mean and 95th percentile are split into separate charts on purpose. They are different
-questions and they do not move together: the mean is roughly what a device harvests in an
-average month, while the 95th percentile is the energetic tail it has to survive.
-Plotting them as paired bars on one axis would let the tail squash the mean flat, and
-putting them on two y-axes would be worse.
+```{python}
+#| label: fig-daily-climatology-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily significant wave height ($H_{m0}$): median, 25-75% band, and 7-day average"
+daily_climatology("Hm0")
+```
 
-The $J$ pair is the one to look at. At PacWave South in January the mean is 91 kW/m while
-the 95th percentile is 211 — the top 5% of sea states run about 2.3 times the month's
-average, and that gap is the central difficulty of wave energy: the resource you earn
-from and the load you must survive are not the same number. The ratio is not a winter
-story either. It ranges from roughly 1.6 in August to 3.3 in September, so the *peakiest*
-months are the shoulder months, when quiet spells are punctuated by the first big swells
-rather than sustained by them.
+```{python}
+#| label: fig-daily-climatology-te
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily energy period ($T_e$): median, 25-75% band, and 7-day average"
+daily_climatology("Te")
+```
+
+```{python}
+#| label: fig-daily-climatology-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily omnidirectional wave energy flux ($J$): median, 25-75% band, and 7-day average"
+daily_climatology("J")
+```
+
+A 7-day average still tracks individual storm systems; a 30-day average smooths
+past them and leaves the seasonal signal on its own
+(@fig-rolling-7d-j, @fig-rolling-30d-j).
+
+```{python}
+#| label: fig-rolling-7d-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), 7-day moving average of the daily median omnidirectional wave energy flux ($J$)"
+rolling_median("J", 7)
+```
+
+```{python}
+#| label: fig-rolling-30d-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), 30-day moving average of the daily median omnidirectional wave energy flux ($J$)"
+rolling_median("J", 30)
+```
+
+## Monthly bars
+
+One labeled bar per month (@fig-monthly-bar-hm0-mean through
+@fig-monthly-bar-j-p95). Mean and 95th percentile are separate figures: the mean is roughly what a device harvests in an average month, the 95th
+percentile is the tail it must survive, and paired bars on one axis would let the
+tail squash the mean flat.
 
 ```{python}
 def monthly_bar(q, stat_label, agg, fmt, name):
-    """One labeled bar per month of `q`, aggregated by `agg`.
-
-    Single series, so a single hue and no legend -- the axis label names it. The
-    colour matches this variable's colour in the charts above.
-    """
+    """One labeled bar per month of `q`, aggregated by `agg`."""
     monthly = data[q].groupby(data.index.month).agg(agg)
-    fig, ax = plt.subplots(figsize=(8, 4))
-    bars = ax.bar(months, monthly.reindex(months).values,
-                  color=colors[list(QOIS).index(q)])
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
+    bars = ax.bar(months, monthly.reindex(months).values, color=qcolor(q))
     ax.bar_label(bars, fmt=fmt, padding=2, fontsize=9, color="0.25")
     ax.set(xlabel="Month", ylabel=f"{stat_label} {QOIS[q]}")
     ax.set_xticks(months)
@@ -564,23 +458,43 @@ def monthly_bar(q, stat_label, agg, fmt, name):
 
 
 p95 = lambda s: s.quantile(0.95)
+```
 
+```{python}
+#| label: fig-monthly-bar-hm0-mean
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean significant wave height ($H_{m0}$) per month"
 monthly_bar("Hm0", "Mean", "mean", "%.2f", "monthly_bar_hm0_mean")
+```
+
+```{python}
+#| label: fig-monthly-bar-hm0-p95
+#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile significant wave height ($H_{m0}$) per month"
 monthly_bar("Hm0", "95th percentile", p95, "%.2f", "monthly_bar_hm0_p95")
+```
+
+```{python}
+#| label: fig-monthly-bar-j-mean
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) per month"
 monthly_bar("J", "Mean", "mean", "%.1f", "monthly_bar_j_mean")
+```
+
+```{python}
+#| label: fig-monthly-bar-j-p95
+#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile omnidirectional wave energy flux ($J$) per month"
 monthly_bar("J", "95th percentile", p95, "%.1f", "monthly_bar_j_p95")
 ```
 
-## 3. Joint Probability Distribution
+# Joint Probability Distribution {#sec-jpd}
 
-Joint probability distribution (percent of the year) over the ($H_{m0}$, $T_e$)
-sea-state bins.
+Joint probability of occurrence (percent of the year) over the ($H_{m0}$, $T_e$)
+sea-state bins (@fig-jpd-frequency). This matrix is the resource half of device
+performance: paired with a device power matrix it becomes AEP in @sec-aep.
 
 ```{python}
 Hm0_bins = np.arange(0, np.ceil(data.Hm0.max()) + 0.5, 0.5)
 Te_bins = np.arange(0, np.ceil(data.Te.max()) + 1, 1)
 
-# Joint probability of occurrence (reused as the AEP frequency matrix below).
+# Joint probability of occurrence (reused as the AEP frequency matrix in @sec-aep).
 frequency = performance.wave_energy_flux_matrix(
     data.Hm0, data.Te, data.J, "frequency", Hm0_bins, Te_bins
 )
@@ -588,53 +502,32 @@ print(frequency.to_string())
 ```
 
 ```{python}
-# Percent of the year each sea state occurs (frequency sums to 1 -> ×100 = %).
-frequency_pct = frequency * 100
-
-plot_wave_matrix(
-    frequency_pct, zlabel="Joint Probability [% of year]"
-)
-
-
+#| label: fig-jpd-frequency
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of ($H_{m0}$, $T_e$) sea states, percent of the year"
+plot_wave_matrix(frequency * 100, zlabel="Joint Probability [% of year]")
 savefig("jpd_frequency_matrix")
 ```
 
-## 4. Extreme Sea States
+# Extreme Sea States {#sec-extremes}
 
-Fifty- and one-hundred-year environmental contours bound the extreme sea states a device
-must survive. `contours.environmental_contours` offers **ten** methods, in three families:
-five parametric (`PCA`, `gaussian`, `gumbel`, `clayton`, `rosenblatt`), three nonparametric
-(`nonparametric_gaussian`, `nonparametric_clayton`, `nonparametric_gumbel`), and two
-kernel-density (`bivariate_KDE`, `bivariate_KDE_log`).
+Fifty- and one-hundred-year environmental contours bound the extreme sea states a
+device must survive (@fig-extreme-contours). This document uses the `PCA` method
+throughout, following the Wave Energy Converter Design Response Toolbox
+[@coe2016_wdrt]: it applies principal component analysis to $(H_{m0}, T_e)$, fits
+an inverse Gaussian in the rotated frame, and reads the contour off a circle of
+iso-probability using the inverse first-order reliability method (I-FORM)
+[@eckert2016_pca_iform].
 
-Everything below uses `PCA`, following the Wave Energy Converter Design Response Toolbox
-(WDRT). It applies principal component analysis to $(H_{m0}, T_e)$, fits an inverse Gaussian
-in the rotated frame, and reads the contour off a circle of iso-probability using the
-inverse first-order reliability method (I-FORM) — Eckert-Gallup et al. 2016.
-
-**The choice is not a detail.** Running this same year of PacWave South data through all ten
-puts the 100-year $H_{m0}$ anywhere between **8.2 m and 16.5 m — it doubles**. The four
-parametric copulas agree exactly with each other (8.2 m) because they share one marginal
-Weibull fit for $H_{m0}$; the copula only shapes the conditional $T_e$, which itself ranges
-from 11.0 to 20.2 s at the contour's peak. The three nonparametric methods likewise agree
-(8.6 m). So there are really four distinct answers: 8.2, 8.6, 11.2 (PCA), and 16.5
-(`bivariate_KDE_log`).
-
-The 11.2 m reported below is therefore *PCA's* answer, not *the* answer, and the method
-matters more than anything else varied in this document — more than the site, and more than
-the length of the record. Read "a single hindcast year is illustrative, not a formal
-extreme-value estimate" as meaning it literally.
-
-Eckert-Gallup, A. C., Sallaberry, C. J., Dallman, A. R., & Neary, V. S. (2016). Application
-of principal component analysis (PCA) and improved joint probability distributions to the
-inverse first-order reliability method (I-FORM) for predicting extreme sea states. *Ocean
-Engineering*, 112, 307–319.
-
-Coe, Ryan, Michelen, Carlos, Eckert-Gallup, Aubrey, Yu, Yi-Hsiang, and Van Rij, Jennifer.
-(2016, March 30). WEC Design Response Toolbox v. 1.0 (Version 00) [Computer software].
-https://www.osti.gov//servlets/purl/1312743.
+Two caveats. `environmental_contours` offers ten methods, and the choice moves the
+100-year $H_{m0}$ by meters, more than the site or the record length does. The
+values below are PCA's answer, not the only answer (the full ten-method comparison
+lives in the experiment version of this document). A single hindcast year is
+illustrative, not a formal extreme-value estimate. @sec-contour-records quantifies
+how much the record length moves the result.
 
 ```{python}
+#| label: fig-extreme-contours
+#| fig-cap: "PacWave South (44.5670, -124.2290), 50- and 100-year environmental contours ($H_{m0}$ vs $T_e$, PCA)"
 # Seconds between sea-state samples (3-hour hindcast -> 10800 s).
 dt = (data.index[1] - data.index[0]).total_seconds()
 
@@ -644,7 +537,7 @@ copulas100 = contours.environmental_contours(data.Hm0, data.Te, dt, 100, method=
 Hm0_contours = [copulas50["PCA_x1"], copulas100["PCA_x1"]]
 Te_contours = [copulas50["PCA_x2"], copulas100["PCA_x2"]]
 
-fig, ax = plt.subplots(figsize=(8, 4))
+fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
 graphics.plot_environmental_contour(
     data.Te.values,
     data.Hm0.values,
@@ -668,42 +561,15 @@ for label, cop in (("50-year", copulas50), ("100-year", copulas100)):
     print(f"{label}: H_m0 max {cop['PCA_x1'].max():.1f} m at T_e {cop['PCA_x2'][i]:.1f} s")
 ```
 
-## 5. Representative Sea State Clusters
+# Exceedance Probability {#sec-exceedance}
 
-Simulating a wave energy converter against every 3-hourly sea state is intractable, so WEC
-design optimization uses a limited number of *representative* sea states. A Gaussian-mixture
-model (GMM), a more general form of k-means, groups the ($T_e$, $H_{m0}$) sea states into
-clusters and locates a representative center for each, following the density of the data.
-We fit increasing cluster counts (4, 8, 16, 32, 64); more clusters capture the resource
-more faithfully at the cost of more simulations.
-
-The source buoy example next reconstructed each cluster's energy from a JONSWAP spectrum to
-compare against the total resource energy. That step needs spectral frequency bins, which the
-bulk-parameter hindcast does not provide, so it is omitted here.
+Exceedance probability is how often the site exceeds a given sea state, the
+survivability view of the same record. @fig-exceedance-hm0 is the empirical
+survival function $P(H_{m0} > x)$.
 
 ```{python}
-cluster_counts = [8, 32]
-X = np.vstack((data.Te.values, data.Hm0.values)).T
-
-fig, axs = plt.subplots(len(cluster_counts), 1, figsize=(8, 10), sharex=True)
-for ax, n in zip(axs, cluster_counts):
-    # random_state fixes the fit so renders are reproducible.
-    gmm = GaussianMixture(n_components=n, random_state=0).fit(X)
-    labels = gmm.predict(X)
-    centers = gmm.means_  # columns: Te, Hm0
-    ax.scatter(data.Te.values, data.Hm0.values, c=labels, s=20, cmap="viridis")
-    ax.plot(centers[:, 0], centers[:, 1], "m+", markersize=12)
-    ax.set(title=f"{n} clusters", ylabel="$H_{m0}$ [m]")
-axs[-1].set_xlabel("Energy Period, $T_e$ [s]")
-fig.tight_layout()
-savefig("sea_state_clusters")
-```
-
-## 6. Exceedance Probability
-
-Empirical survival function $P(H_{m0} > x)$.
-
-```{python}
+#| label: fig-exceedance-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), exceedance probability of significant wave height ($H_{m0}$)"
 hm0_sorted = np.sort(data.Hm0.values)
 exceedance = 1.0 - np.arange(1, hm0_sorted.size + 1) / (hm0_sorted.size + 1)
 
@@ -718,83 +584,167 @@ ax.grid(True, which="both", alpha=0.3)
 savefig("exceedance_hm0")
 ```
 
-## 7. Directionality
+# Directionality {#sec-directionality}
 
-Direction (θ) vs $H_{m0}$, $T_e$, and wave power, colored by joint probability
-distribution (% of year); plus mean wave power by direction sector.
+Where the waves come from decides device orientation and array layout. The wave
+rose (@fig-wave-rose) shows how often each direction sector occurs, stacked by
+$H_{m0}$; the polar joint probability panels
+(@fig-polar-jpd-hm0, @fig-polar-jpd-te, @fig-polar-jpd-j) resolve the same
+directions against each variable; and @fig-directionality-mean-power shows where
+the mean power arrives from.
+
+::: {.callout-note}
+## Direction conventions
+
+Directions come back in the meteorological convention (degrees clockwise from
+north, the direction waves arrive *from*) for every domain. The published S3
+files already use it, and the package applies the one correction that exists
+(Hawaii's API CSVs) automatically, with `describe_point()["direction_transform"]`
+recording whether it did. An earlier version of this example inherited a $-90°$
+rotation written against a different product (the 1-hour virtual buoy); it is not
+applied here, and the raw 3-hour directions at PacWave South are consistent with
+the WNW prevailing direction in the site's published specification. Anyone
+depending on absolute direction should confirm the convention against a
+co-located measured buoy.
+:::
 
 ```{python}
 Dir_bins = np.arange(0, 360 + 15, 15)
-
-
-def polar_jpd(ax, radius, r_bins, r_label):
-    counts, _, _ = np.histogram2d(data.Dir, radius, bins=[Dir_bins, r_bins])
-    counts = counts / counts.sum() * 100  # % of year per (direction, radius) bin
-    th, rr = np.meshgrid(np.deg2rad(Dir_bins), r_bins, indexing="ij")
-    pcm = ax.pcolormesh(th, rr, counts, shading="auto", cmap="viridis")
-    ax.set_theta_zero_location("N")
-    ax.set_theta_direction(-1)
-    ax.set_title(r_label, pad=15)
-    plt.colorbar(pcm, ax=ax, label="% of year", pad=0.1)
-
-
-fig, axes = plt.subplots(
-    3, 1, figsize=(6, 15), subplot_kw={"projection": "polar"}
-)
-polar_jpd(axes[0], data.Hm0, Hm0_bins, "$H_{m0}$ [m] by direction")
-polar_jpd(axes[1], data.Te, Te_bins, "$T_e$ [s] by direction")
-polar_jpd(axes[2], data.J, np.linspace(0, data.J.max(), len(Hm0_bins)), "$J$ [kW/m] by direction")
-fig.tight_layout()
-savefig("directionality_polar_jpd")
 ```
 
 ```{python}
-# Mean wave power per direction sector.
-sector = pd.cut(data.Dir, Dir_bins)
-mean_J = data.J.groupby(sector, observed=False).mean()
+#| label: fig-wave-rose
+#| fig-cap: "PacWave South (44.5670, -124.2290), wave rose: percent of the year by direction, stacked by significant wave height ($H_{m0}$) band"
+rose_bands = [0, 1, 2, 3, 4, np.inf]  # Hm0 [m]
+band_labels = ["0-1 m", "1-2 m", "2-3 m", "3-4 m", ">4 m"]
+
+rose_sector = pd.cut(data.Dir, Dir_bins, right=False)
+band = pd.cut(data.Hm0, rose_bands, labels=band_labels, right=False)
+# reindex both ways: crosstab drops empty sectors and empty bands, but the
+# stacked bars need all 24 directions and every band.
+rose = (
+    pd.crosstab(rose_sector, band)
+    .reindex(index=rose_sector.cat.categories, columns=band_labels, fill_value=0)
+    / len(data) * 100  # % of year
+)
+
+theta = np.deg2rad(Dir_bins[:-1] + 7.5)
+band_colors = sns.color_palette("viridis", n_colors=len(band_labels))
+
+fig, ax = plt.subplots(figsize=(7, 7), subplot_kw={"projection": "polar"})
+bottom = np.zeros(len(theta))
+for label, color in zip(band_labels, band_colors):
+    values = rose[label].to_numpy()
+    ax.bar(theta, values, width=np.deg2rad(15), bottom=bottom,
+           color=color, edgecolor="white", linewidth=0.4, label=label)
+    bottom += values
+ax.set_theta_zero_location("N")
+ax.set_theta_direction(-1)
+ax.legend(title="$H_{m0}$", loc="upper left", bbox_to_anchor=(1.08, 1.0))
+fig.tight_layout()
+savefig("directionality_wave_rose")
+```
+
+```{python}
+def polar_jpd(radius, r_bins, r_label, name):
+    """Polar joint probability of direction against `radius`, % of year."""
+    counts, _, _ = np.histogram2d(data.Dir, radius, bins=[Dir_bins, r_bins])
+    counts = counts / counts.sum() * 100  # % of year per (direction, radius) bin
+    th, rr = np.meshgrid(np.deg2rad(Dir_bins), r_bins, indexing="ij")
+    fig, ax = plt.subplots(figsize=(7, 6), subplot_kw={"projection": "polar"})
+    pcm = ax.pcolormesh(th, rr, counts, shading="auto", cmap="viridis")
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    plt.colorbar(pcm, ax=ax, label="% of year", pad=0.1)
+    fig.tight_layout()
+    savefig(name)
+```
+
+```{python}
+#| label: fig-polar-jpd-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and significant wave height ($H_{m0}$)"
+polar_jpd(data.Hm0, Hm0_bins, QOIS["Hm0"], "polar_jpd_hm0")
+```
+
+```{python}
+#| label: fig-polar-jpd-te
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and energy period ($T_e$)"
+polar_jpd(data.Te, Te_bins, QOIS["Te"], "polar_jpd_te")
+```
+
+```{python}
+#| label: fig-polar-jpd-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and omnidirectional wave energy flux ($J$)"
+polar_jpd(data.J, np.linspace(0, data.J.max(), len(Hm0_bins)), QOIS["J"], "polar_jpd_j")
+```
+
+```{python}
+#| label: fig-directionality-mean-power
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) by direction sector"
+mean_sector = pd.cut(data.Dir, Dir_bins)
+mean_J = data.J.groupby(mean_sector, observed=False).mean()
 centers = np.deg2rad(Dir_bins[:-1] + 7.5)
 
 fig, ax = plt.subplots(figsize=(6, 6), subplot_kw={"projection": "polar"})
 ax.bar(centers, mean_J.fillna(0).values, width=np.deg2rad(15), alpha=0.7)
 ax.set_theta_zero_location("N")
 ax.set_theta_direction(-1)
-ax.set_title("Mean $J$ [kW/m] by direction", pad=15)
 savefig("directionality_mean_power")
 ```
 
-## 8. Multiple Sites: Comparison
+# Annual Energy Production (AEP) {#sec-aep}
 
-The single-site pipeline above characterizes one location; here we place several sites
-side by side. Edit `SITES_TO_COMPARE`, a plain list of `WAVE_ENERGY_TEST_SITES` keys, to
-add or omit sites. Every fetch lands in the package cache, so re-runs skip S3 entirely.
-Every site keeps one color (from Matplotlib's `tab10`) across all four figures.
+AEP is the electrical energy a device would deliver at this site over a year.
+Computing it needs two matrices on the same sea-state bins: the resource side,
+which @sec-jpd's joint probability matrix already provides, and the device side,
+a power matrix, which is a property of a specific WEC and is not carried in
+this document.
 
-Reading the source grid rather than the 1-hour virtual buoy widens the comparison from
-one domain to five: the sites below span West Coast, Hawaii, Atlantic, Alaska, and Gulf
-of Mexico / Puerto Rico. The virtual buoy could not have done this — it covers the West
-Coast only.
+To run this section, supply a power matrix in exactly this format:
 
-Note what is being compared. The Alaska and Puerto Rico points are open water with no test
-facility, included to exercise those domains. The Atlantic is represented by Pioneer WEC
-rather than Jennette's Pier, and the reason is worth being precise about, because it is
-easy to get wrong.
+- a pandas DataFrame with the same index and columns as the `frequency` matrix
+  from @sec-jpd: rows are the $H_{m0}$ bin centers of `Hm0_bins` (0.5 m steps),
+  columns are the $T_e$ bin centers of `Te_bins` (1 s steps)
+- each value is the mean electrical power in kW the device delivers in that
+  ($H_{m0}$, $T_e$) sea state
+- bins the device cannot operate in are 0 (cut-out above, below cut-in), not NaN
 
-With MHKiT's **default** binning, the pier's 100-year contour fails outright:
-`environmental_contours` raises `LinAlgError: SVD did not converge`. It is tempting to read
-that as "the site is too depth-limited to characterise". It is not. `_copula_parameters`
-puts everything below `initial_bin_max_val` (default 1.0 m) in one bin and then steps up in
-`bin_val_size` (default 0.25 m) increments until a bin holds fewer than `min_bin_count`
-(default 40) points. The pier sits in roughly 10 m of water with $H_{m0}$ spanning
-0.13–1.62 m, so **1,529 of its 2,920 sea states land in that first bin** and barely 0.6 m of
-range is left for the rest. The conditional fit ends up with a handful of nearly identical
-$H_{m0}$ values, its quadratic design matrix $(1, x, x^2)$ goes collinear, and the least
-squares solve gives up.
+AEP is the element-wise product of the two matrices, summed, times the hours in
+the record: each bin contributes (fraction of the year) x (power in that bin).
+When working from measured device data instead, mhkit's
+`performance.mean_annual_energy_production_matrix(CWM, JM, frequency)` computes
+the same quantity from a capture width matrix.
 
-Pass `bin_val_size=0.10` and the same site contours without complaint, peaking at 2.89 m.
-So the default failure is a statement about MHKiT's bin defaults, tuned for open-ocean
-$H_{m0}$ ranges, and not a statement about the ocean at Nags Head. The defaults are a
-starting point, not a law. Pioneer WEC is used below simply because it needs no such
-tuning; uncomment the pier and pass `bin_val_size=0.10` to see it work.
+```{python}
+# POWER_MATRIX: device power [kW] on the same bins as `frequency` (see the format
+# above). For example: pd.read_csv("device_power_matrix.csv", index_col=0) with
+# the bin centers as index/column labels.
+POWER_MATRIX = None
+
+hours_in_record = record_hours(data)
+
+if POWER_MATRIX is not None:
+    aep_kwh = float((frequency * POWER_MATRIX).to_numpy().sum()) * hours_in_record
+    print(f"AEP: {aep_kwh / 1e3:,.0f} MWh over {hours_in_record:.0f} h")
+else:
+    print("No power matrix supplied -- section stubbed. See the format above.")
+```
+
+# Multiple Sites: Comparison {#sec-multisite}
+
+The single-site pipeline above characterizes one location; here we place several
+sites side by side. Edit `SITES_TO_COMPARE`, a list of
+`WAVE_ENERGY_TEST_SITES` keys, to add or omit sites. Every fetch lands in the
+package cache, so re-runs skip S3 entirely. Every site keeps one color across
+every figure below.
+
+The Alaska and Puerto Rico points are open water with no test facility, included
+to exercise those domains. The Atlantic domain is omitted for now: multi-year S3
+reads of its files (the largest in the dataset) currently stall mid-download.
+When re-enabled, Pioneer WEC is the site to prefer over Jennette's Pier. The
+pier's narrow, depth-limited $H_{m0}$ range breaks `environmental_contours`
+under MHKiT's default binning (`LinAlgError`), a statement about the bin
+defaults rather than the ocean, and `bin_val_size=0.10` fixes it.
 
 ```{python}
 SITES_TO_COMPARE = [
@@ -803,9 +753,10 @@ SITES_TO_COMPARE = [
     "US_California_Humboldt_Bay",              # West_Coast
     "US_California_San_Luis_Obispo",           # West_Coast
     "US_Hawaii_Oahu_WETS",                     # Hawaii
-    "US_Massachusetts_WoodsHole_PioneerWec",   # Atlantic
     "US_Alaska_Kodiak",                        # Alaska
     "US_PuertoRico_North_Shore",               # Gulf_of_Mexico_and_Puerto_Rico
+    # "US_Massachusetts_WoodsHole_PioneerWec", # Atlantic; multi-year S3 reads
+    #                                          # currently stall -- see above
     # "US_North_Carolina_Jenettes_Pier",       # Atlantic; needs bin_val_size=0.10
     #                                          # to contour -- see the note above
 ]  # comment a key in/out to include/omit that site
@@ -824,150 +775,45 @@ site_colors = {name: tab10(i) for i, name in enumerate(site_data)}
 {name: df.shape for name, df in site_data.items()}
 ```
 
-### 7-day moving averages
+## Site KPIs
 
-A 7-day centered moving average of each 3-hourly quantity smooths out storm-scale noise
-and exposes the seasonal cycle. One line per site; the legend sits outside the axes.
-
-```{python}
-fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
-for ax, (q, ylabel) in zip(axes, QOIS.items()):
-    for name, df in site_data.items():
-        roll = df[q].rolling("7D", center=True, min_periods=1).mean()
-        ax.plot(roll.index, roll, color=site_colors[name],
-                label=WAVE_ENERGY_TEST_SITES[name]["label"], linewidth=1.5)
-    ax.set(ylabel=ylabel)
-    ax.margins(x=0)
-axes[-1].set_xlabel("Date")
-axes[0].legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.autofmt_xdate()  # rotate/thin the date ticks; unrotated they overlap into mush
-fig.tight_layout()
-savefig("multisite_moving_average")
-```
-
-### 30-day moving averages
-
-The same comparison over a 30-day window. Smoothing past individual storm systems leaves
-the seasonal cycle, and the sites do not rank the way latitude alone would suggest.
-Comparing each site's mean $J$ over Dec–Feb against Jun–Aug for 2020, the West Coast swings
-hardest — PacWave South runs 71 kW/m in winter against 14 kW/m in summer, a factor of 5 —
-while Hawaii is the flattest at about 2. But Kodiak, the highest-latitude site here, is
-mid-pack at roughly 2.9, *less* seasonal than the Puerto Rico point at 3.6 and than San
-Luis Obispo at 4.5. Seasonality here is set by which storm tracks a site is exposed to,
-not by how far north it sits. As ever, these are one year's numbers.
+One row per site (@tbl-site-kpis), ranked by annual mean $J$. The annual energy
+column is the resource per meter of wave front, mean $J$ integrated over the
+record. @fig-mean-vs-p95 sets the mean against the 95th percentile on one linear
+axis; the gap between them separates what a device earns from (the mean) and what
+it must survive (the tail).
 
 ```{python}
-fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
-for ax, (q, ylabel) in zip(axes, QOIS.items()):
-    for name, df in site_data.items():
-        roll = df[q].rolling("30D", center=True, min_periods=1).mean()
-        ax.plot(roll.index, roll, color=site_colors[name],
-                label=WAVE_ENERGY_TEST_SITES[name]["label"], linewidth=1.5)
-    ax.set(ylabel=ylabel)
-    ax.margins(x=0)
-axes[-1].set_xlabel("Date")
-axes[0].legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.autofmt_xdate()  # rotate/thin the date ticks; unrotated they overlap into mush
-fig.tight_layout()
-savefig("multisite_moving_average_30d")
-```
-
-### Monthly grids: every site, every month
-
-The single-site bars do not survive being repeated eight times: mean $J$ spans 91 kW/m at
-PacWave South in January down to 2 kW/m at San Luis Obispo in August, a factor of about
-45, so a shared axis flattens the low-energy sites into slivers and eight sets of grouped
-bars is 96 bars nobody can read. A grid takes the same numbers and gives each site a row.
-Every cell is labeled, so the exact value is still there to read — colour is the fast path,
-not the only one.
-
-Rows are ordered by annual mean $J$, so the ranking reads straight down the y-axis.
-
-```{python}
-# Sites ranked by annual mean J, richest first. Every figure below reuses this order so
-# the ranking is the same wherever you look. Colour still follows the site, not its rank.
+#| label: tbl-site-kpis
+#| tbl-cap: "Site KPIs for the loaded year"
+# Sites ranked by annual mean J, richest first. Every figure below reuses this
+# order so the ranking is the same wherever you look.
 site_order = sorted(site_data, key=lambda n: site_data[n]["J"].mean(), reverse=True)
 
-
-def site_month_matrix(q, agg):
-    """Sites (rows) x months (columns) of `q` aggregated by `agg`, richest site first."""
-    frame = pd.DataFrame(
-        {
-            WAVE_ENERGY_TEST_SITES[name]["label"]: site_data[name][q]
-            .groupby(site_data[name].index.month)
-            .agg(agg)
-            .reindex(months)
-            for name in site_order
+kpis = pd.DataFrame(
+    {
+        WAVE_ENERGY_TEST_SITES[n]["label"]: {
+            "mean Hm0 [m]": site_data[n].Hm0.mean(),
+            "max Hm0 [m]": site_data[n].Hm0.max(),
+            "mean Te [s]": site_data[n].Te.mean(),
+            "mean J [kW/m]": site_data[n].J.mean(),
+            "p95 J [kW/m]": site_data[n].J.quantile(0.95),
+            "annual energy [MWh/m]": site_data[n].J.mean() * record_hours(site_data[n]) / 1000,
         }
-    ).T
-    frame.columns = month_labels
-    return frame
-
-
-def plot_site_month_heatmap(matrix, cbar_label, name, fmt=".0f", **kw):
-    """Annotated sites x months grid. Values are labeled, so colour need not be exact."""
-    plt.figure(figsize=(11, 4.5))
-    ax = sns.heatmap(matrix, annot=True, fmt=fmt, annot_kws={"size": 8},
-                     linewidths=0.5, cbar_kws={"label": cbar_label}, **kw)
-    ax.set_xlabel("Month")
-    ax.tick_params(axis="y", rotation=0)
-    plt.tight_layout()
-    savefig(name)
+        for n in site_order
+    }
+).T
+show_table(kpis.round(1))
 ```
 
-The dynamic range is the point of this first pair, so the colour scale is absolute and
-shared: the low-energy rows *should* look dark next to PacWave, because that is the
-finding. Mean and 95th percentile stay on separate grids for the same reason they were
-split for the single site.
-
 ```{python}
-plot_site_month_heatmap(
-    site_month_matrix("J", "mean"),
-    "Mean $J$ [kW/m]", "multisite_month_j_mean", cmap="viridis",
-)
-plot_site_month_heatmap(
-    site_month_matrix("J", p95),
-    "95th percentile $J$ [kW/m]", "multisite_month_j_p95", cmap="viridis",
-)
-```
-
-The same means, now divided by each site's own annual mean. This deliberately throws away
-magnitude to ask a different question — *when* is each site's season? — and it surfaces
-structure the absolute grid cannot show, because a site can be both small and violently
-seasonal. Red is a month above that site's annual average, blue below, white at 1.0.
-
-```{python}
-j_mean = site_month_matrix("J", "mean")
-plot_site_month_heatmap(
-    j_mean.div(j_mean.mean(axis=1), axis=0),
-    "$J$ relative to that site's annual mean", "multisite_month_j_seasonality",
-    fmt=".1f", cmap="RdBu_r", center=1.0,
-)
-```
-
-### Four other ways to look at the same numbers
-
-A grid is a table wearing colour: with every cell labeled, the colour earns little, and a
-monthly mean has already thrown away the distribution underneath it. Below are four
-different framings of the same eight sites. None of them is strictly better — each buys
-legibility by giving something up, and the give-up is named in each case. The tension is
-always the same: **no linear, month-resolved view can hold a 45× spread across eight
-sites**, so every option drops months, drops magnitude, or distorts the scale.
-
-#### Mean against 95th percentile
-
-The most compact of the four, and the one that concedes least. Both statistics sit on a
-single linear axis, so the spread is real rather than transformed, and the **gap** — not
-either endpoint — is the subject. That gap is the design problem: PacWave South earns from
-a 46 kW/m average but must survive 157, while San Luis Obispo lives between 6 and 18. What
-it gives up is the calendar: there are no months here at all.
-
-```{python}
+#| label: fig-mean-vs-p95
+#| fig-cap: "Annual mean against 95th percentile omnidirectional wave energy flux ($J$) per site"
 annual_mean = pd.Series({n: site_data[n]["J"].mean() for n in site_order})
 annual_p95 = pd.Series({n: site_data[n]["J"].quantile(0.95) for n in site_order})
 rank = annual_mean.sort_values().index  # ascending: richest at the top of the axis
 
-fig, ax = plt.subplots(figsize=(8, 4.5))
+fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4.5))
 y = np.arange(len(rank))
 ax.hlines(y, annual_mean[rank], annual_p95[rank], color="0.75", linewidth=2, zorder=1)
 ax.scatter(annual_mean[rank], y, s=70, zorder=2,
@@ -987,487 +833,85 @@ fig.tight_layout()
 savefig("multisite_mean_vs_p95")
 ```
 
-#### Winter against summer
+## Moving averages
 
-The seasonal collapse as a single stroke per site. Steeper is more seasonal. It keeps a
-true linear axis and needs no legend, but compresses the year into two numbers, so a site
-whose peak falls outside DJF — Pioneer WEC's September, say — is misrepresented by it.
-
-```{python}
-winter = pd.Series({n: site_data[n]["J"][site_data[n].index.month.isin([12, 1, 2])].mean()
-                    for n in site_order})
-summer = pd.Series({n: site_data[n]["J"][site_data[n].index.month.isin([6, 7, 8])].mean()
-                    for n in site_order})
-
-fig, ax = plt.subplots(figsize=(7.5, 6))
-def spread(values):
-    """Label y-positions with a minimum gap, so co-located sites don't overprint.
-
-    Several sites share a value at each end -- WETS and San Luis Obispo are both
-    ~11 kW/m in winter, PacWave South and North both ~14 in summer -- and their
-    labels would otherwise sit on top of each other.
-    """
-    gap = (values.max() - values.min()) * 0.035
-    out, last = {}, -np.inf
-    for n in values.sort_values().index:
-        out[n] = last = max(values[n], last + gap)
-    return out
-
-
-winter_y, summer_y = spread(winter), spread(summer)
-for n in site_order:
-    ax.plot([0, 1], [winter[n], summer[n]], marker="o", color=site_colors[n], linewidth=2)
-    ax.annotate(f"{WAVE_ENERGY_TEST_SITES[n]['label']}  {winter[n]:.0f}", (0, winter_y[n]),
-                ha="right", va="center", size=8, color="0.25",
-                xytext=(-8, 0), textcoords="offset points")
-    ax.annotate(f"{summer[n]:.0f}", (1, summer_y[n]), ha="left", va="center", size=8,
-                color="0.25", xytext=(8, 0), textcoords="offset points")
-ax.set_xlim(-0.62, 1.22)
-ax.set_xticks([0, 1])
-ax.set_xticklabels(["Winter (DJF)", "Summer (JJA)"])
-ax.set_ylabel("Mean $J$ [kW/m]")
-fig.tight_layout()
-savefig("multisite_winter_summer")
-```
-
-#### Small multiples
-
-The single-site monthly bars, repeated per site on one shared linear axis. An earlier
-version of this figure used a log axis so that every site's seasonal shape stayed legible.
-That was a mistake worth naming: a log axis turns PacWave's 45-fold advantage over San Luis
-Obispo into about one gridline, which *hides the very thing this comparison exists to
-show*. Wave power spans decades honestly, and squashing it to fit is not a rendering
-convenience, it is a misrepresentation.
-
-So the axis is linear and the bottom row is nearly flat. That is not a defect — San Luis
-Obispo really does have a fortieth of PacWave's resource, and any chart that lets you
-forget it is lying. Take seasonal shape from the seasonality grid, which normalises
-explicitly and says so.
+A centered moving average smooths storm-scale noise and exposes each site's
+seasonal cycle. The 7-day window (@fig-multisite-7d-hm0 through
+@fig-multisite-7d-j) still tracks individual storms; the 30-day window
+(@fig-multisite-30d-hm0 through @fig-multisite-30d-j) leaves the seasonal signal.
+Seasonality follows the storm tracks a site is exposed to, not its latitude.
 
 ```{python}
-fig, axes = plt.subplots(2, 4, figsize=(13, 5.4), sharey=True)
-for ax, name in zip(axes.flat, site_order):
-    monthly = site_data[name]["J"].groupby(site_data[name].index.month).mean().reindex(months)
-    ax.bar(months, monthly.values, color=site_colors[name])
-    ax.set_title(WAVE_ENERGY_TEST_SITES[name]["label"], size=9)
-    ax.set_xticks(months)
-    ax.set_xticklabels(month_labels, size=6, rotation=90)
-    ax.grid(True, which="both", axis="y", alpha=0.3)
-for ax in axes[:, 0]:
-    ax.set_ylabel("Mean $J$ [kW/m]")
-fig.tight_layout()
-savefig("multisite_month_bars")
+def multisite_rolling(q, window, name):
+    """`window` centered moving average of `q`, one line per site."""
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
+    for site, df in site_data.items():
+        roll = df[q].rolling(window, center=True, min_periods=1).mean()
+        ax.plot(roll.index, roll, color=site_colors[site],
+                label=WAVE_ENERGY_TEST_SITES[site]["label"], linewidth=1.5)
+    ax.set(xlabel="Date", ylabel=QOIS[q])
+    ax.margins(x=0)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
+    fig.autofmt_xdate()  # rotate/thin the date ticks; unrotated they overlap
+    fig.tight_layout()
+    savefig(name)
 ```
-
-#### Polar
-
-Months are cyclical and a circle says so: December sits next to January, which every
-chart above breaks. The radial scale is shared, so the polygons are honestly comparable —
-but that is also the catch, as the low-energy sites shrink to specks, and the eye reads
-polar *area*, which grows as the square of the radius and so overstates the big sites.
-Best treated as a shape-recognition view, not a measurement one.
 
 ```{python}
-fig, axes = plt.subplots(2, 4, figsize=(13, 6.6), subplot_kw={"projection": "polar"})
-theta = np.linspace(0, 2 * np.pi, 12, endpoint=False)
-radial_max = max(
-    site_data[n]["J"].groupby(site_data[n].index.month).mean().max() for n in site_order
-)
-for ax, name in zip(axes.flat, site_order):
-    monthly = site_data[name]["J"].groupby(site_data[name].index.month).mean().reindex(months)
-    closed_r = np.append(monthly.values, monthly.values[0])  # close the polygon
-    closed_t = np.append(theta, theta[0])
-    ax.plot(closed_t, closed_r, color=site_colors[name], linewidth=2)
-    ax.fill(closed_t, closed_r, color=site_colors[name], alpha=0.25)
-    ax.set_xticks(theta)
-    ax.set_xticklabels(month_labels, size=6)
-    ax.set_theta_zero_location("N")
-    ax.set_theta_direction(-1)  # clockwise: Jan -> Feb -> Mar
-    ax.set_ylim(0, radial_max)
-    ax.set_title(WAVE_ENERGY_TEST_SITES[name]["label"], size=9, pad=12)
-    ax.tick_params(labelsize=5)
-fig.suptitle("Mean $J$ [kW/m], shared radial scale", size=10)
-fig.tight_layout()
-savefig("multisite_month_polar")
+#| label: fig-multisite-7d-hm0
+#| fig-cap: "7-day moving average of significant wave height ($H_{m0}$), all sites"
+multisite_rolling("Hm0", "7D", "multisite_7d_hm0")
 ```
-
-### Three more, from seaborn's own gallery
-
-Everything above compares *monthly means*, which is the real complaint against the grid:
-a mean is one number standing in for 240 sea states, and the spread it hides is most of
-what distinguishes these sites. Seaborn's figure-level plots (`relplot`, `catplot`) take
-the same data in long form and put that spread back.
 
 ```{python}
-# Long ("tidy") form: one row per sea state per site, which is what the figure-level
-# seaborn functions expect. Site is an *ordered categorical* -- the ranking has to live
-# in the data, not in a set_yticklabels() call, or the axis silently disagrees with the
-# marks it is labelling.
-site_labels = [WAVE_ENERGY_TEST_SITES[n]["label"] for n in site_order]
-tidy = pd.concat(
-    [site_data[n].assign(Site=WAVE_ENERGY_TEST_SITES[n]["label"]) for n in site_order]
-)
-tidy["MonthNum"] = tidy.index.month
-tidy["Month"] = pd.Categorical(
-    [month_labels[m - 1] for m in tidy.index.month], categories=month_labels, ordered=True
-)
-tidy["Site"] = pd.Categorical(tidy["Site"], categories=site_labels, ordered=True)
-label_colors = {WAVE_ENERGY_TEST_SITES[n]["label"]: site_colors[n] for n in site_order}
+#| label: fig-multisite-7d-te
+#| fig-cap: "7-day moving average of energy period ($T_e$), all sites"
+multisite_rolling("Te", "7D", "multisite_7d_te")
 ```
-
-#### `relplot`: month profiles with their spread
-
-The one that concedes least of anything here. A shared **linear** axis keeps the dynamic
-range honest — San Luis Obispo really is a flat line next to PacWave, and that is the
-finding, not a rendering artifact — while the band spans the 25th–75th percentile of the
-sea states behind each monthly point, so the mean is no longer alone. The cost is only
-vertical space.
 
 ```{python}
-g = sns.relplot(
-    data=tidy, x="MonthNum", y="J", col="Site", col_order=site_labels, col_wrap=4,
-    kind="line", errorbar=("pi", 50), height=2.5, aspect=1.5, color="#4c72b0",
-)
-for ax in g.axes.flat:
-    ax.set_xticks(months)
-    ax.set_xticklabels(month_labels, size=6, rotation=90)
-    ax.set_xlabel("")
-g.set_titles("{col_name}", size=9)
-g.set_ylabels("$J$ [kW/m]")
-g.figure.suptitle("Monthly mean $J$ with 25th–75th percentile band", y=1.02, size=10)
-savefig("multisite_relplot_month_band")
+#| label: fig-multisite-7d-j
+#| fig-cap: "7-day moving average of omnidirectional wave energy flux ($J$), all sites"
+multisite_rolling("J", "7D", "multisite_7d_j")
 ```
-
-#### `relplot`: magnitude as size, not just colour
-
-The grid's failing was that colour saturates — every low-energy row goes uniformly dark
-and stops carrying information. Encoding the same number as **area as well as hue** gives
-it somewhere else to go, and the 45× spread becomes visible as size while the calendar
-stays on the x-axis. Same numbers as the first heatmap, read far more easily.
 
 ```{python}
-monthly_mean = (
-    tidy.groupby(["Site", "Month"], observed=True)["J"].mean().reset_index()
-)
-g = sns.relplot(
-    data=monthly_mean, x="Month", y="Site", size="J", hue="J",
-    sizes=(15, 420), palette="viridis", height=4.2, aspect=2.3, legend="brief",
-)
-g.set(xlabel="Month", ylabel="")
-g.ax.grid(True, alpha=0.3)
-g.figure.suptitle("Mean $J$ [kW/m] — area and hue both carry magnitude", y=1.02, size=10)
-savefig("multisite_relplot_bubbles")
+#| label: fig-multisite-30d-hm0
+#| fig-cap: "30-day moving average of significant wave height ($H_{m0}$), all sites"
+multisite_rolling("Hm0", "30D", "multisite_30d_hm0")
 ```
-
-#### `catplot`: the whole distribution, not a mean
-
-The most detailed view, and the direct answer to "a monthly mean is too coarse". Each box
-is the full distribution of that month's sea states — median, quartiles, and the
-progressively thinner tails a letter-value plot draws instead of lumping them into
-"outliers". Look at Pioneer WEC in September: the month averages 47 kW/m but its tail
-reaches **895 kW/m**, nineteen times its own mean. That is a hurricane, it is the single
-most energetic thing in this entire comparison, and *every* mean-based chart above —
-including all three heatmaps — renders it as an unremarkable 47. The axis is linear, so
-that tail is drawn at its true distance from the body of the distribution, and the calmer
-sites' boxes are correspondingly small. That is the honest shape of wave power.
 
 ```{python}
-g = sns.catplot(
-    data=tidy, x="Month", y="J", col="Site", col_order=site_labels, col_wrap=4,
-    kind="boxen", height=2.5, aspect=1.5, color="#4c72b0", linewidth=0.4,
-)
-for ax in g.axes.flat:
-    ax.set_xlabel("")
-    ax.tick_params(axis="x", labelsize=6, rotation=90)
-g.set_titles("{col_name}", size=9)
-g.set_ylabels("$J$ [kW/m]")
-savefig("multisite_catplot_boxen")
+#| label: fig-multisite-30d-te
+#| fig-cap: "30-day moving average of energy period ($T_e$), all sites"
+multisite_rolling("Te", "30D", "multisite_30d_te")
 ```
-
-### 100-year contours
-
-The 100-year environmental contours from Section 4, overlaid across sites: each site's
-3-hourly sea states appear as a light scatter, with its PCA 100-year contour drawn in the
-same color. As in Section 4, a single hindcast year is illustrative, not a formal
-extreme-value estimate.
 
 ```{python}
-fig, ax = plt.subplots(figsize=(8, 6))
-for name, df in site_data.items():
-    color = site_colors[name]
-    dt = (df.index[1] - df.index[0]).total_seconds()  # 10800 s for 3-hour data
-    ax.scatter(df.Te, df.Hm0, s=4, color=color, alpha=0.15, edgecolors="none")
-    try:
-        cop = contours.environmental_contours(df.Hm0, df.Te, dt, 100, method="PCA")
-    except np.linalg.LinAlgError as e:
-        # A narrow Hm0 range can collapse the conditional fit's design matrix under
-        # the default binning (see the note above; bin_val_size=0.10 usually fixes
-        # it). Show the site's scatter, skip its contour, and say which and why.
-        print(f"no contour for {WAVE_ENERGY_TEST_SITES[name]['label']}: {e}")
-        continue
-    ax.plot(cop["PCA_x2"], cop["PCA_x1"], color=color, linewidth=2.2,
-            label=WAVE_ENERGY_TEST_SITES[name]["label"])
-ax.set(
-    xlabel="Energy Period, $T_e$ [s]",
-    ylabel="Significant Wave Height, $H_{m0}$ [m]",
-)
-ax.legend(title="100-year contour", loc="upper left",
-          bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.tight_layout()
-savefig("multisite_contour_100yr")
+#| label: fig-multisite-30d-j
+#| fig-cap: "30-day moving average of omnidirectional wave energy flux ($J$), all sites"
+multisite_rolling("J", "30D", "multisite_30d_j")
 ```
 
-## 9. Direct Comparison: One Axes, All Sites
+# Environmental Contours: 1, 3 and 5 Year Records {#sec-contour-records}
 
-Everything in Section 8 that used facets asks you to hold eight panels in your head and
-compare from memory. The contour figure above does not — every site is drawn on one pair
-of axes, so the comparison happens in the eye rather than the head. That is what makes it
-the most useful figure in this document, and it works because each site is reduced to *a
-curve*: eight curves coexist on one axes where eight histograms cannot.
-
-The charts below apply that same idea to the rest of the comparison. Each is one axes and
-all eight sites.
-
-### The scatter layer is doing no work
-
-The contour figure layers ~23,000 sea states under the curves, and eight overlapping
-clouds average out to a brown haze — the *contours* carry that chart, not the points. A
-2-D kernel density draws the same information as one closed curve per site: the 50%
-iso-density envelope, inside which each site spends half its year.
-
-This is where each site actually lives. San Luis Obispo is the outlier — long-period,
-low-height swell, sitting clearly apart from everything else — while PacWave South, North
-and Humboldt Bay overlap almost exactly, which is the real finding: they are effectively
-the same sea state, differing in how much of it they get.
-
-```{python}
-fig, ax = plt.subplots(figsize=(8.5, 6))
-sns.kdeplot(
-    data=tidy, x="Te", y="Hm0", hue="Site", hue_order=site_labels,
-    palette=label_colors, levels=[0.5], linewidths=2, ax=ax,
-)
-ax.set(xlabel="Energy Period, $T_e$ [s]",
-       ylabel="Significant Wave Height, $H_{m0}$ [m]", ylim=(0, 4))
-fig.tight_layout()
-savefig("multisite_operating_envelope")
-```
-
-### Operating envelope against 100-year extreme
-
-The contour figure above is left as it is; this is the same idea with the scatter replaced
-by the envelope. Dashed is where a site spends half its year, solid is the 100-year
-contour it must survive, and the **distance between them is the engineering problem**:
-PacWave South operates around $H_{m0}$ 2–2.5 m and is designed against 11 m. The envelopes
-look small precisely because the extremes are so far away — that gap is the subject, not a
-scaling accident.
-
-```{python}
-fig, ax = plt.subplots(figsize=(9.5, 7))
-sns.kdeplot(  # operational: 50% of sea states
-    data=tidy, x="Te", y="Hm0", hue="Site", hue_order=site_labels,
-    palette=label_colors, levels=[0.5], linewidths=1.6, linestyles="--",
-    ax=ax, legend=False,
-)
-for name in site_order:  # extreme: the same 100-year contours as above
-    df = site_data[name]
-    dt = (df.index[1] - df.index[0]).total_seconds()
-    try:
-        cop = contours.environmental_contours(df.Hm0, df.Te, dt, 100, method="PCA")
-    except np.linalg.LinAlgError:
-        continue
-    ax.plot(cop["PCA_x2"], cop["PCA_x1"], color=site_colors[name], linewidth=2.2,
-            label=WAVE_ENERGY_TEST_SITES[name]["label"])
-ax.set(xlabel="Energy Period, $T_e$ [s]",
-       ylabel="Significant Wave Height, $H_{m0}$ [m]", ylim=(0, 16))
-ax.legend(title="Site", loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.tight_layout()
-savefig("multisite_envelope_vs_contour")
-```
-
-### Exceedance: how much of the year, above what
-
-The most direct answer to "which site has more resource, and how much more". Every sea
-state of the year enters the curve — nothing is binned, smoothed, or averaged away — and
-the curves nest left to right, so the ranking *is* the picture. Read any threshold
-straight off: at 50 kW/m, PacWave South spends 29.5% of the year above it and San Luis
-Obispo 0.4%, a difference of roughly seventy times that no bar chart of means conveys.
-
-```{python}
-fig, ax = plt.subplots(figsize=(8.5, 5.5))
-sns.ecdfplot(
-    data=tidy, x="J", hue="Site", hue_order=site_labels, palette=label_colors,
-    complementary=True, linewidth=2, ax=ax,
-)
-for fraction in (0.5, 0.1):  # median and top-decile reference lines
-    ax.axhline(fraction, color="0.6", linestyle=":", linewidth=1)
-ax.set(xlabel="$J$ [kW/m]", ylabel="Fraction of the year exceeding")
-fig.tight_layout()
-savefig("multisite_exceedance_all")
-```
-
-### Ranked distributions
-
-The same distributions as violins, ranked by annual mean, with quartiles marked inside.
-Pioneer WEC is the shape to notice: the tallest violin of the eight despite a middling
-average, spanning 0.15 to 895 kW/m because a hurricane sits in its tail.
-
-```{python}
-fig, ax = plt.subplots(figsize=(9, 5))
-sns.violinplot(
-    data=tidy, x="Site", y="J", order=site_labels, hue="Site", hue_order=site_labels,
-    palette=label_colors, legend=False, density_norm="width",
-    cut=0, inner="quartile", ax=ax,
-)
-ax.set(xlabel="", ylabel="$J$ [kW/m]")
-ax.tick_params(axis="x", rotation=25)
-fig.tight_layout()
-savefig("multisite_violin_ranked")
-```
-
-### Envelope with marginals
-
-The envelope again, with each site's $T_e$ and $H_{m0}$ distributions on the margins —
-the most information of any figure here. The marginals are what earn it: the $T_e$ ridge
-along the top separates the sites more cleanly than the joint panel does, and it is where
-San Luis Obispo's long-period swell and Pioneer WEC's short, steep seas are most obvious.
-
-```{python}
-grid = sns.JointGrid(data=tidy, x="Te", y="Hm0", hue="Site", hue_order=site_labels,
-                     palette=label_colors, height=7)
-grid.plot_joint(sns.kdeplot, levels=[0.5], linewidths=1.8)
-grid.plot_marginals(sns.kdeplot, fill=False, linewidth=1.5, common_norm=False)
-grid.ax_joint.set_ylim(0, 4)
-grid.set_axis_labels("Energy Period, $T_e$ [s]", "Significant Wave Height, $H_{m0}$ [m]")
-grid.ax_joint.legend_.set(bbox_to_anchor=(1.28, 1), loc="upper left", title="Site")
-savefig("multisite_jointgrid")
-```
-
-### The raw distributions
-
-Everything up to here has compared a *statistic* — a mean, a percentile, an envelope, an
-extreme. These are the underlying distributions themselves, all eight sites on one axes
-per variable, nothing summarised, and every axis linear — $J$ spans decades and is drawn
-that way, with its long right tail at full length rather than folded up to fit.
-
-$H_{m0}$ and $T_e$ are drawn as densities; $J$ is not, and the reason is worth stating. A
-density of $J$ on a linear axis is a spike against the origin: one 895 kW/m hurricane sets
-the axis while 99% of the year lives in the first few percent of it. That is the honest
-shape and it is also unreadable. Squeezing the axis to fix it would misrepresent the
-spread, so $J$ gets an empirical CDF instead — every sea state exactly as recorded, no
-bandwidth guess, nothing truncated. Read it as "what fraction of the year sits below this
-power".
-
-$T_e$ is the surprise. The sites barely separate in $H_{m0}$ — every one of them piles up
-between 1 and 3 m — and they overlap heavily in $J$ too. But in $T_e$ they fall into a
-clean ordered sequence, from Pioneer WEC's short, steep wind sea near 4.5 s through to San
-Luis Obispo's long Pacific swell near 12 s. Period, not height, is what actually
-distinguishes these sites from one another, and it is the variable a device is tuned to.
-
-```{python}
-fig, axes = plt.subplots(3, 1, figsize=(8.5, 9.5))
-for i, (ax, (q, label)) in enumerate(zip(axes, QOIS.items())):
-    if q == "J":  # too heavy-tailed for a density on a linear axis
-        sns.ecdfplot(data=tidy, x=q, hue="Site", hue_order=site_labels,
-                     palette=label_colors, linewidth=1.8, ax=ax, legend=(i == 0))
-        ax.set(xlabel=label, ylabel="Proportion below")
-    else:
-        sns.kdeplot(data=tidy, x=q, hue="Site", hue_order=site_labels,
-                    palette=label_colors, linewidth=1.8, common_norm=False,
-                    ax=ax, legend=(i == 0))
-        ax.set(xlabel=label, ylabel="Density")
-    if i == 0:
-        sns.move_legend(ax, "upper left", bbox_to_anchor=(1.02, 1), title="Site")
-fig.tight_layout()
-savefig("multisite_distributions")
-```
-
-### The same distributions, month by month
-
-`displot` is the distribution-flavoured sibling of `relplot` — same FacetGrid underneath,
-so `col="Month", col_wrap=3` lays the year out three across and four down. Each panel is
-one month with all eight sites overlaid, which turns the seasonal cycle into something you
-watch rather than infer: the whole field slides left into August and marches back right by
-December, and the sites' *ordering* barely changes while doing it.
-
-The $H_{m0}$ and $T_e$ y-axes are unshared and unlabeled deliberately: density height
-depends on how narrow a distribution is, so comparing peak heights across panels would
-mislead — shape and horizontal position are the signal. $J$ is an ECDF for the reason given
-above, and its y-axis *is* meaningful.
-
-```{python}
-for q, label in QOIS.items():
-    g = sns.displot(
-        data=tidy, x=q, hue="Site", hue_order=site_labels, palette=label_colors,
-        col="Month", col_wrap=3, kind="ecdf" if q == "J" else "kde",
-        height=2.0, aspect=1.5, linewidth=1.2, facet_kws={"sharey": False},
-    )
-    g.set_titles("{col_name}", size=9)
-    g.set_axis_labels(label, "Proportion below" if q == "J" else "")
-    if q != "J":
-        g.set(yticks=[])
-    g.figure.suptitle(f"{label} distribution by month, all sites", y=1.01, size=11)
-    savefig(f"multisite_dist_by_month_{q.lower()}")
-```
-
-### Each site against the field
-
-Borrowed from seaborn's [`timeseries_facets`](https://seaborn.pydata.org/examples/timeseries_facets.html)
-example, whose real trick is not the faceting — it is that every panel redraws the *whole
-field* in grey and highlights one series on top. That is what repairs the usual failing of
-small multiples: each panel becomes a comparison in itself rather than something you have
-to hold in memory while looking at the next one.
-
-It only works with **one** highlighted series per panel, which is why these facet by site
-rather than by month. Tried the other way round — a facet per month with all eight sites
-coloured on top of the twelve months in grey — the panel carries twenty curves, the grey
-stops reading as context and turns to haze. The pattern needs something to contrast
-against.
-
-Read down the column: PacWave South and North sit furthest right and are broad, Humboldt
-just behind them, and San Luis Obispo is both furthest left and narrow — a small resource
-that is at least consistent. WETS is the narrowest of all.
-
-```{python}
-for q, label in QOIS.items():
-    ecdf = q == "J"  # too heavy-tailed for a density on a linear axis
-    g = sns.displot(
-        data=tidy, x=q, hue="Site", hue_order=site_labels, palette=label_colors,
-        col="Site", col_order=site_labels, col_wrap=4,
-        kind="ecdf" if ecdf else "kde", height=2.2, aspect=1.5, linewidth=2.2,
-        facet_kws={"sharey": False}, legend=False, zorder=5,
-    )
-    for ax in g.axes.flat:  # the whole field, grey, behind every panel
-        for other in site_labels:
-            plot = sns.ecdfplot if ecdf else sns.kdeplot
-            plot(data=tidy[tidy["Site"] == other], x=q,
-                 color="0.75", linewidth=0.9, ax=ax, zorder=1)
-    g.set_titles("{col_name}", size=9)
-    if not ecdf:
-        g.set(yticks=[])
-    g.set_axis_labels(label, "Proportion below" if ecdf else "")
-    g.figure.suptitle(f"{label}: each site against all eight", y=1.01, size=11)
-    savefig(f"multisite_dist_vs_field_{q.lower()}")
-```
-
-## 10. Does a Longer Record Change the Answer?
-
-Every contour so far carries the same caveat: one year is illustrative, not an extreme-value
-estimate. A 100-year contour extrapolated from 2,920 sea states is asking a single year to
-speak for a century, and the honest question is not whether that is wrong but *how* wrong —
-which is answerable by simply doing it again with more years and looking at what moves.
+A 100-year contour extrapolated from one year of data asks a few thousand
+3-hour sea states to speak for a century. The size of that error is measurable.
+Refit the contour on more years and look at what moves. Here the 100-year PCA
+contour is refit per site on 1, 3 and 5 years of record.
 
 `load_site` takes a list of years, so a longer record is one query: the package
-fetches the span in a single cached pull (five years × five variables still sits
-under the S3/API seam, so it stays on the free backend). Change `CONTOUR_YEARS` to
-widen or narrow the window; the figures follow.
+fetches the span in a single cached pull (five years times five variables still
+sits under the S3/API seam, so it stays on the free backend). Change
+`CONTOUR_YEARS` to widen or narrow the window.
 
 ```{python}
 CONTOUR_YEARS = [2016, 2017, 2018, 2019, 2020]
 
-# Nested windows, all ending at YEAR: 1 -> [2020], 5 -> [2016..2020]. Each is a
-# superset of the one before, so any change between them comes from added data and
-# not from swapping which years are in play.
-YEAR_WINDOWS = {n: CONTOUR_YEARS[-n:] for n in range(1, len(CONTOUR_YEARS) + 1)}
+# Nested windows, all ending at YEAR: 1 -> [2020], 3 -> [2018..2020],
+# 5 -> [2016..2020]. Each is a superset of the one before, so any change between
+# them comes from added data and not from swapping which years are in play.
+YEAR_WINDOWS = {n: CONTOUR_YEARS[-n:] for n in (1, 3, 5)}
 
 
 def load_site_years(name, years=CONTOUR_YEARS):
@@ -1480,51 +924,35 @@ def load_site_years(name, years=CONTOUR_YEARS):
     return df[df.index.year.isin(years)]
 
 
-# --- Contour cache -------------------------------------------------------------
-# Fitting a contour is the expensive step in this document: the nonparametric and
-# KDE methods take ~15 s each, and Sections 10-11 need hundreds of fits. Every fit
-# is a pure function of (site, years, method, return_period), so it is cached to
-# disk under .cache/contours/ and re-renders read it back in milliseconds. The
-# result is small (two coordinate arrays), unlike the raw sea-state pickles.
-# Set FORCE_CONTOURS = True to ignore the cache and recompute everything.
+# Fitting a contour is the expensive step in this document; each fit is a pure
+# function of (site, years, method, return_period), so results are memoised to
+# .cache/contours/. Set FORCE_CONTOURS = True to recompute everything.
 FORCE_CONTOURS = False
 CONTOUR_CACHE_DIR = CACHE_DIR / "contours"
-CONTOUR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def contour(name, years, method="PCA", return_period=100, xvar="Te", force=None):
-    """100-year (default) contour for one site+record+method, memoised to disk.
+def contour(name, years, method="PCA", return_period=100, force=None):
+    """100-year (default) contour for one site+record, memoised to disk.
 
-    `xvar` picks the second variable: "Te" (energy period, the document default and
-    the WEC-design convention) or "Tp" (spectral peak period, used where a J value
-    has to be reconstructed from the contour — see the representative-extreme table).
-    Returns a dict with 'x1' (Hm0) and 'x2' (the chosen period), or both None if the
-    fit does not converge.
+    Returns a dict with 'x1' (Hm0) and 'x2' (Te), or both None if the fit does
+    not converge.
     """
-    force = FORCE_CONTOURS if force is None else force
-    # Te contours keep the original key (no suffix) so the existing cache stays valid.
-    suffix = "" if xvar == "Te" else f"__{xvar}"
-    key = f"{name}__{years[0]}-{years[-1]}__{method}__{return_period}yr{suffix}.pkl"
-    path = CONTOUR_CACHE_DIR / key
-    if path.exists() and not force:
-        return pd.read_pickle(path)
+    def fit():
+        df = load_site_years(name, years=years)
+        dt = (df.index[1] - df.index[0]).total_seconds()
+        try:
+            cop = contours.environmental_contours(
+                df.Hm0, df.Te, dt, return_period, method=method)
+            return {"x2": np.asarray(cop[f"{method}_x2"]),
+                    "x1": np.asarray(cop[f"{method}_x1"])}
+        except (np.linalg.LinAlgError, ValueError):
+            return {"x2": None, "x1": None}
 
-    df = load_site_years(name, years=years)
-    dt = (df.index[1] - df.index[0]).total_seconds()
-    kwargs = {}
-    if method.startswith("bivariate_KDE"):
-        # Scale the bandwidth to each variable's own spread rather than one flat
-        # number for both Hm0 (m) and the period (s).
-        kwargs["bandwidth"] = [0.3 * df.Hm0.std(), 0.3 * df[xvar].std()]
-    try:
-        cop = contours.environmental_contours(
-            df.Hm0, df[xvar], dt, return_period, method=method, **kwargs)
-        result = {"x2": np.asarray(cop[f"{method}_x2"]),
-                  "x1": np.asarray(cop[f"{method}_x1"])}
-    except (np.linalg.LinAlgError, ValueError):
-        result = {"x2": None, "x1": None}
-    pd.to_pickle(result, path)
-    return result
+    key = f"{name}__{years[0]}-{years[-1]}__{method}__{return_period}yr.pkl"
+    return memoize_pickle(
+        CONTOUR_CACHE_DIR / key, fit,
+        force=FORCE_CONTOURS if force is None else force,
+    )
 
 
 def contour_peak(name, years, method="PCA", return_period=100):
@@ -1540,48 +968,18 @@ record = pd.Series(
 print(record.to_string())
 ```
 
-### The same contour, on a longer record
+## The extreme against the length of the record
 
-This is the Section 8 contour figure rebuilt on the full five-year record — same sites, same
-colours, same method. It is tempting to read this as the corrected version of that one. The
-rest of this section is about why that reading is wrong.
-
-```{python}
-fig, ax = plt.subplots(figsize=(8.5, 6.5))
-for name in site_order:
-    cop = contour(name, CONTOUR_YEARS)  # cached PCA, 100-year
-    if cop["x1"] is None:
-        print(f"no contour for {WAVE_ENERGY_TEST_SITES[name]['label']}")
-        continue
-    ax.plot(cop["x2"], cop["x1"], color=site_colors[name], linewidth=2.2,
-            label=WAVE_ENERGY_TEST_SITES[name]["label"])
-ax.set(xlabel="Energy Period, $T_e$ [s]",
-       ylabel="Significant Wave Height, $H_{m0}$ [m]")
-ax.legend(title=f"100-year contour, {CONTOUR_YEARS[0]}–{CONTOUR_YEARS[-1]}",
-          loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-fig.tight_layout()
-savefig("multisite_contour_100yr_multiyear")
-```
-
-### The extreme against the length of the record
-
-This is the section's real result. For each site, the peak of the 100-year contour —
-the one number a designer takes away — recomputed on 1, 2, 3, 4 and 5 years, each window a
-superset of the last.
-
-If a longer record simply refined the estimate, these lines would settle: big moves early,
-then a plateau. **They do not.** They wander, they cross, they reverse, and at the 4→5 year
-step several are still moving by half a metre. PacWave South reads 11.2 m on 2020 alone,
-9.2 m on three years, and 12.5 m on five — and the three-year value is the outlier, not the
-one-year value.
-
-The lesson is not "use more years". It is that within 1–5 years this estimate has not
-converged at all, so **any single window is an arbitrary draw from a distribution of
-answers**. A number quoted from one window without saying which window is not meaningful.
-Watch PacWave South and North especially: a few kilometres apart, statistically
-indistinguishable seas, and their lines are not even parallel.
+For each site, the peak of the 100-year contour, the one number a designer takes
+away, is recomputed on 1, 3 and 5 years, each window a superset of the last
+(@fig-contour-peak-sweep). If a longer record simply refined the estimate, these
+lines would settle. They do not: within one to five years the estimate has not
+converged, so any single window is one draw from a distribution of answers, and a
+number quoted from one window without saying which window is not meaningful.
 
 ```{python}
+#| label: fig-contour-peak-sweep
+#| fig-cap: "Peak 100-year significant wave height ($H_{m0}$) against record length, all sites"
 sweep = pd.DataFrame(
     {
         WAVE_ENERGY_TEST_SITES[name]["label"]: {
@@ -1591,7 +989,7 @@ sweep = pd.DataFrame(
     }
 )
 
-fig, ax = plt.subplots(figsize=(8.5, 5.5))
+fig, ax = plt.subplots(figsize=(FIG_WIDTH, 5.5))
 for name in site_order:
     label = WAVE_ENERGY_TEST_SITES[name]["label"]
     ax.plot(sweep.index, sweep[label], marker="o", color=site_colors[name],
@@ -1611,280 +1009,66 @@ table["range [m]"] = (table.max(axis=1) - table.min(axis=1))
 print(table.round(2).to_string())
 ```
 
-The `range` column is the spread of answers a site gives depending only on how many years
-you happened to use. For most of these sites it is 1–3 m of $H_{m0}$ on a ~10 m design
-value, from a choice that has nothing to do with the ocean.
+The `range` column is the spread of answers a site gives depending only on how
+many years were used, a choice that has nothing to do with the ocean.
 
-### The contour itself, at each record length
+## The contour at each record length
 
-The same thing as curves rather than numbers: one panel per window length, every site drawn
-in each. Watching a single colour across the five panels shows the shape moving, not just
-its peak — and shows that the movement is not a steady convergence towards anything.
-
-```{python}
-fig, axes = plt.subplots(1, len(YEAR_WINDOWS), figsize=(19, 4.2),
-                         sharex=True, sharey=True)
-for ax, (n, years) in zip(axes, YEAR_WINDOWS.items()):
-    for name in site_order:
-        cop = contour(name, years)  # cached PCA, 100-year
-        if cop["x1"] is None:
-            continue
-        ax.plot(cop["x2"], cop["x1"], color=site_colors[name], linewidth=1.6,
-                label=WAVE_ENERGY_TEST_SITES[name]["label"] if n == len(YEAR_WINDOWS) else None)
-    ax.set_title(f"{n} year{'s' if n > 1 else ''}  ({years[0]}–{years[-1]})", size=9)
-    ax.set_xlabel("$T_e$ [s]")
-axes[0].set_ylabel("$H_{m0}$ [m]")
-axes[-1].legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
-fig.suptitle("100-year contour by length of record", size=11)
-fig.tight_layout()
-savefig("contour_by_record_length")
-```
-
-## 11. Does the Method Change the Answer?
-
-Section 10 showed that the length of the record moves the 100-year contour and never
-settles. This section holds the record fixed — the full five years — and varies the
-*method* instead. `contours.environmental_contours` offers ten (Section 4), and the
-question is the same: how much of the final number is the ocean, and how much is the choice
-of estimator?
-
-One column per site, every method drawn in each, so the comparison happens within a site
-rather than across the page. Reading down a column, the answer is stark: the estimators do
-not agree, and they disagree by *more* than the record length moved things and far more than
-the sites differ from one another for a fixed method.
+The same result as curves (@fig-contour-1yr, @fig-contour-3yr, @fig-contour-5yr):
+every site's 100-year contour on one window per figure, on shared axes limits, so
+following one color across the figures shows the shape moving, not just its peak.
 
 ```{python}
-METHODS = {
-    "PCA": "parametric",
-    "gaussian": "parametric",
-    "gumbel": "parametric",
-    "clayton": "parametric",
-    "rosenblatt": "parametric",
-    "nonparametric_gaussian": "nonparametric",
-    "nonparametric_clayton": "nonparametric",
-    "nonparametric_gumbel": "nonparametric",
-    "bivariate_KDE": "KDE",
-    "bivariate_KDE_log": "KDE",
+# Fit (or read back) every window's contours once, and frame all three figures
+# to the same limits so they compare directly.
+window_contours = {
+    n: {name: contour(name, years) for name in site_order}
+    for n, years in YEAR_WINDOWS.items()
 }
-# One colour per family: the members of a family share a marginal fit and so give nearly
-# identical peaks, which the plot should show as overlapping rather than eight rivals.
-FAMILY_COLOR = {"parametric": "#1f77b4", "nonparametric": "#d62728", "KDE": "#2ca02c"}
-```
+_fitted = [c for by_site in window_contours.values()
+           for c in by_site.values() if c["x1"] is not None]
+te_max = max(np.nanmax(c["x2"]) for c in _fitted)
+hm0_max = max(np.nanmax(c["x1"]) for c in _fitted)
 
-Each of the 80 contours below (ten methods × eight sites, five-year record) goes through
-the same disk cache as Section 10, so this section is slow only on its first render — after
-that the plot and the summary table both read the fits back in milliseconds. The
-nonparametric methods take ~15 s apiece to fit the first time.
 
-```{python}
-# bivariate_KDE_log fits the density in log space, which on this data throws a
-# 100-year contour out to Te ~ 40 s at Hm0 ~ 0 -- a physically impossible period
-# and an artifact of the method's tail, not a real sea state. Each panel is framed
-# to the OTHER nine methods so that comparison stays readable; the KDE-log curve is
-# still drawn and simply runs past the frame edge. Its peak is in the table below.
-# Nothing is compressed -- the view is cropped to the physical Te range.
-FRAME_METHODS = [m for m in METHODS if m != "bivariate_KDE_log"]
-
-fig, axes = plt.subplots(len(site_order), 1, figsize=(7.5, 3.1 * len(site_order)),
-                         sharex=False)
-for ax, name in zip(axes, site_order):
-    for method, family in METHODS.items():
-        cop = contour(name, CONTOUR_YEARS, method=method)
+def plot_window_contours(n):
+    """All sites' 100-year contours for one record-length window."""
+    years = YEAR_WINDOWS[n]
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 5))
+    for name in site_order:
+        cop = window_contours[n][name]
         if cop["x1"] is None:
-            print(f"no {method} for {WAVE_ENERGY_TEST_SITES[name]['label']}")
             continue
-        ax.plot(cop["x2"], cop["x1"], color=FAMILY_COLOR[family], linewidth=1.4, alpha=0.85)
-    # Frame from the nine well-behaved methods; KDE-log runs off the right edge.
-    # Contour arrays can carry NaNs, so reduce with nan-aware min/max.
-    framed = [contour(name, CONTOUR_YEARS, method=m) for m in FRAME_METHODS]
-    te = np.concatenate([c["x2"] for c in framed if c["x2"] is not None])
-    hm0 = np.concatenate([c["x1"] for c in framed if c["x1"] is not None])
-    ax.set_xlim(min(np.nanmin(te), 0), np.nanmax(te) * 1.05)
-    ax.set_ylim(min(np.nanmin(hm0), 0), np.nanmax(hm0) * 1.10)
-    ax.set_title(WAVE_ENERGY_TEST_SITES[name]["label"], size=9, loc="left")
-    ax.set(xlabel="Energy Period, $T_e$ [s]", ylabel="$H_{m0}$ [m]")
-handles = [plt.Line2D([], [], color=c, linewidth=2, label=f)
-           for f, c in FAMILY_COLOR.items()]
-axes[0].legend(handles=handles, title="method family", loc="upper right", fontsize=8)
-fig.suptitle("100-year contour by method, five-year record", size=11, y=1.005)
-fig.tight_layout()
-savefig("contour_by_method_per_site")
-```
-
-Each panel is framed to the nine well-behaved methods. The tenth, `bivariate_KDE_log`
-(green), runs off the right edge at every site — it fits the density in log space and
-throws a contour tail out to $T_e \approx 40$ s at $H_{m0} \approx 0$, a period no real sea
-state reaches. That is an artifact of the method's tail, not an estimate; its peak $H_{m0}$
-is still reported in the table below, it is simply not allowed to set the frame.
-
-The colouring is by family for a reason the numbers make clear: the five parametric methods
-share one marginal Weibull fit for $H_{m0}$ and so return an almost identical peak,
-differing only in the conditional $T_e$; the three nonparametric methods likewise agree with
-each other; and `bivariate_KDE` sits close to `PCA`. Ten methods, but really only a few
-distinct answers — and they still disagree by several metres.
-
-```{python}
-peak_by_method = pd.DataFrame(
-    {
-        WAVE_ENERGY_TEST_SITES[name]["label"]: {
-            method: contour_peak(name, CONTOUR_YEARS, method=method)
-            for method in METHODS
-        }
-        for name in site_order
-    }
-).T
-peak_by_method["method range [m]"] = (
-    peak_by_method.max(axis=1) - peak_by_method.min(axis=1)
-)
-print(peak_by_method.round(1).to_string())
-```
-
-Set that `method range` column beside the `range` column from Section 10. For every site,
-**the choice of method moves the 100-year $H_{m0}$ by more than five years of record length
-does** — for Pioneer WEC, about 16 m against 3. The single most consequential decision in an
-extreme-value analysis of this data is not how many years to buy or which site to trust; it
-is which line in the MHKiT documentation to pass as `method`, and that decision is currently
-made by copying whatever the last example used. That is the honest and slightly
-uncomfortable conclusion of this whole exercise.
-
-
-## 12. A Representative Extreme, One Number per Site
-
-Sections 10 and 11 showed that the 100-year extreme moves with the record and moves even
-more with the method — ten methods give a wide spread and no single one is "correct".
-That is honest but not yet *actionable*: a project needs one design number per site,
-comparable across sites.
-
-The neutral way to collapse the spread is the **median of the per-method maxima**. For each
-site, take all ten methods' 100-year contours; on each, read the maximum $H_{m0}$ and the
-maximum energy flux $J$; the representative extreme is the median across the ten. The median
-is deliberate — the maximum across methods would be cherry-picking the worst case, and
-`bivariate_KDE_log`'s outlier is neutralised by taking a median rather than a max.
-
-Two details make $J$ honest here. The contour carries only $H_{m0}$ and a period, not $J$,
-so $J$ is reconstructed at each contour point by building a JONSWAP spectrum and integrating
-it with `mhkit`'s `energy_flux` at the site's **real water depth** (a finite-depth
-calculation, not the deep-water shortcut). And the period used is the **measured peak
-period** $T_p$ carried through from the hindcast — not converted from $T_e$ by a formula —
-so the contours in this section are fitted in $(H_{m0}, T_p)$ space rather than
-$(H_{m0}, T_e)$.
-
-```{python}
-# Water depth per site, read once from each node's `meta` record and cached to
-# disk. The package's S3 backend does not (yet) surface depth in `attrs`, so this
-# reaches one level into its plumbing: `bucket.list_files` names the published
-# .h5 file for a domain-year, `resolve_source(...).open_binary()` range-reads it
-# in place on S3, and h5py pulls the single `meta` row for the node -- no full
-# download. Depth is bathymetry, so which year's file it comes from is immaterial.
-DEPTH_CACHE = CACHE_DIR / "site_depths.pkl"
-if DEPTH_CACHE.exists() and not FORCE_CONTOURS:
-    site_depths = pd.read_pickle(DEPTH_CACHE)
-else:
-    import h5py
-
-    from us_marine_energy_resource.explore.sources import resolve_source
-    from us_marine_energy_resource.wave_hindcast.s3_direct import bucket
-
-    site_depths = {}
-    for name in site_order:
-        attrs = site_data[name].attrs  # node resolution from the Section 8 fetch
-        uri = next(f.uri for f in bucket.list_files(attrs["domain"]) if f.year == YEAR)
-        with (
-            resolve_source(uri).open_binary(max_bytes=None) as handle,
-            h5py.File(handle, "r") as f,
-        ):
-            row = f["meta"][attrs["gid"]]
-            fields = dict(zip(row.dtype.names, row))
-            # The Gulf domain calls it `depth`; the others say `water_depth`.
-            site_depths[name] = float(fields["depth" if "depth" in fields else "water_depth"])
-    pd.to_pickle(site_depths, DEPTH_CACHE)
+        ax.plot(cop["x2"], cop["x1"], color=site_colors[name], linewidth=1.8,
+                label=WAVE_ENERGY_TEST_SITES[name]["label"])
+    ax.set(xlim=(0, te_max * 1.05), ylim=(0, hm0_max * 1.08),
+           xlabel="Energy Period, $T_e$ [s]",
+           ylabel="Significant Wave Height, $H_{m0}$ [m]")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0,
+              fontsize=8)
+    fig.tight_layout()
+    savefig(f"contour_100yr_{n}yr")
 ```
 
 ```{python}
-GAMMA = 3.3
-_JONSWAP_FREQ = np.linspace(0.001, 1.0, 300)  # Hz
-
-
-def contour_max_J(hm0, tp, depth, stride=15):
-    """Largest energy flux [kW/m] on a (Hm0, Tp) contour.
-
-    J is not carried on the contour, so it is reconstructed at each contour point:
-    a JONSWAP spectrum from that point's (Hs = Hm0, Tp), integrated by mhkit's
-    energy_flux at the site's real water depth. Tp is the measured peak period, not
-    a conversion of Te.
-    """
-    best = np.nan
-    for i in range(0, len(hm0), stride):
-        H, T = hm0[i], tp[i]
-        if not (np.isfinite(H) and np.isfinite(T)) or H <= 0 or T <= 0:
-            continue
-        spectrum = resource.jonswap_spectrum(_JONSWAP_FREQ, float(T), float(H), gamma=GAMMA)
-        flux = resource.energy_flux(spectrum, depth, deep=False)
-        best = np.nanmax([best, float(np.asarray(flux).squeeze()) / 1000.0])
-    return best
-
-
-# Median-of-maxima across the ten methods, cached (the J reconstruction is the one
-# non-trivial cost left after the contour cache). Recompute with FORCE_CONTOURS.
-REPEXT_CACHE = CACHE_DIR / f"repext_{CONTOUR_YEARS[0]}-{CONTOUR_YEARS[-1]}.pkl"
-if REPEXT_CACHE.exists() and not FORCE_CONTOURS:
-    representative = pd.read_pickle(REPEXT_CACHE)
-else:
-    rows = {}
-    for name in site_order:
-        hm0_max, j_max = [], []
-        for method in METHODS:
-            cop = contour(name, CONTOUR_YEARS, method=method, xvar="Tp")
-            if cop["x1"] is None:
-                continue
-            hm0, tp = np.asarray(cop["x1"]), np.asarray(cop["x2"])
-            hm0_max.append(np.nanmax(hm0))
-            j_max.append(contour_max_J(hm0, tp, site_depths[name]))
-        rows[WAVE_ENERGY_TEST_SITES[name]["label"]] = {
-            "Hm0 [m]": np.median(hm0_max),
-            "Hm0 min": np.min(hm0_max), "Hm0 max": np.max(hm0_max),
-            "J [kW/m]": np.median(j_max),
-            "J min": np.min(j_max), "J max": np.max(j_max),
-            "depth [m]": site_depths[name],
-        }
-    representative = pd.DataFrame(rows).T
-    pd.to_pickle(representative, REPEXT_CACHE)
+#| label: fig-contour-1yr
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 1-year record (2020), all sites"
+plot_window_contours(1)
 ```
-
-### The actionable comparison
-
-One bar per site: the representative 100-year $H_{m0}$ and $J$, sorted. This is what all the
-preceding analysis reduces to — a single survival number per site that a designer can act
-on, with sites directly comparable.
 
 ```{python}
-order = representative.sort_values("Hm0 [m]").index  # ascending -> largest on top in barh
-y = np.arange(len(order))
-bar_colors = [label_colors[label] for label in order]
-
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-for ax, col, fmt, title in (
-    (axes[0], "Hm0 [m]", "%.1f", "Representative 100-yr $H_{m0}$ [m]"),
-    (axes[1], "J [kW/m]", "%.0f", "Representative 100-yr $J$ [kW/m]"),
-):
-    bars = ax.barh(y, representative.loc[order, col], color=bar_colors)
-    ax.bar_label(bars, fmt=fmt, padding=3, fontsize=9, color="0.25")
-    ax.set_yticks(y)
-    ax.set_yticklabels(order if col == "Hm0 [m]" else [])
-    ax.set_title(title, size=10)
-    ax.margins(x=0.14)
-fig.tight_layout()
-savefig("representative_extreme_bars")
+#| label: fig-contour-3yr
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 3-year record (2018-2020), all sites"
+plot_window_contours(3)
 ```
-
-The full breakdown, including the min–max range each site spans across the ten methods —
-the interactive table (HTML/notebook) is sortable and filterable; the PDF shows it static.
-The `min`/`max` columns are the honest reminder that the single bar above is a median over
-a wide method spread, not a precise figure.
 
 ```{python}
-show_table(
-    representative.round(1),
-    caption="Representative 100-year extreme per site (median across 10 methods)",
-)
+#| label: fig-contour-5yr
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 5-year record (2016-2020), all sites"
+plot_window_contours(5)
 ```
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
