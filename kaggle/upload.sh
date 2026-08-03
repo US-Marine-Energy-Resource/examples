@@ -47,5 +47,26 @@ else
   kaggle datasets create -p "$DATASET" --dir-mode zip
 fi
 
+# `datasets version` returns as soon as the upload lands; Kaggle then processes it
+# asynchronously, and `kernels push` pins whatever version is current at push time.
+# Pushing straight away therefore attaches the PREVIOUS version -- which is how the
+# kernel came to run against a dataset with no h2o_examples/download_statistics.py
+# and fail on ModuleNotFoundError. Wait for the new version to go ready first.
+echo "==> waiting for $SLUG to finish processing"
+ready=""
+for _ in $(seq 60); do
+  status="$(kaggle datasets status "$SLUG" 2>/dev/null || true)"
+  case "$status" in
+    *ready*) ready=1; break ;;
+    *error*) echo "error: dataset processing failed: $status" >&2; exit 1 ;;
+  esac
+  sleep 10
+done
+if [ -z "$ready" ]; then
+  echo "error: $SLUG did not report ready within 10 minutes -- not pushing the" >&2
+  echo "       notebook, it would attach the previous dataset version" >&2
+  exit 1
+fi
+
 echo "==> pushing notebook"
 kaggle kernels push -p "$NBDIR"

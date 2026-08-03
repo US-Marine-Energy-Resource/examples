@@ -9,6 +9,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
 
 NOTEBOOK="us_doe_h2o_wave_hindcast_resource_characterization.ipynb"
+WEC_LIBRARY="Wave Energy Converters.csv"
 DATASET="$HERE/dataset"
 NBDIR="$HERE/notebook"
 
@@ -32,12 +33,22 @@ if [ ! -d "$MER_CACHE" ]; then
   echo "error: $MER_CACHE does not exist -- render the notebook once to warm it" >&2
   exit 1
 fi
-rsync -a --exclude '__pycache__' "$REPO/.cache/"       "$DATASET/cache/"
+# The reference-device power matrices. The notebook's find_asset() rglobs
+# /kaggle/input for this by name, so the dataset root is enough -- but it does have
+# to be staged, and it was not: the AEP section died on FileNotFoundError.
+if [ ! -f "$REPO/$WEC_LIBRARY" ]; then
+  echo "error: $REPO/$WEC_LIBRARY not found -- the notebook's AEP section needs it" >&2
+  exit 1
+fi
+# .DS_Store rides along on macOS and gets published into the dataset otherwise.
+rsync -a --exclude '__pycache__' --exclude '.DS_Store' "$REPO/.cache/" "$DATASET/cache/"
 # Ship only the notebook's organized site records (US_*), not raw download
 # intermediates (archives/, s3_chunks/), the manifest, or unrelated cached points.
 rsync -a --include='/US_*/' --include='/US_*/**' --exclude='*' \
   "$MER_CACHE/" "$DATASET/mer_wave_cache/"
-rsync -a --exclude '__pycache__' "$REPO/h2o_examples/" "$DATASET/h2o_examples/"
+rsync -a --exclude '__pycache__' --exclude '.DS_Store' \
+  "$REPO/h2o_examples/" "$DATASET/h2o_examples/"
+cp "$REPO/$WEC_LIBRARY" "$DATASET/$WEC_LIBRARY"
 cp "$HERE/dataset-metadata.json" "$DATASET/dataset-metadata.json"
 
 # --- notebook -----------------------------------------------------------------
