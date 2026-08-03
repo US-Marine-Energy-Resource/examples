@@ -7,7 +7,7 @@ On a developer machine the Kaggle branch is a no-op and only paths are set.
 
 Exports:
     ON_KAGGLE     -- True inside a Kaggle kernel.
-    WORK_DIR      -- root for everything the document writes.
+    WORK_DIR      -- root for everything the example writes.
     CACHE_DIR     -- derived-results cache (contour fits), seeded from the
                      companion Kaggle Dataset when present.
     KAGGLE_ASSETS -- the companion dataset's mount point, or None.
@@ -21,7 +21,7 @@ from pathlib import Path
 
 ON_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle/working").is_dir()
 
-# Everything the document writes hangs off WORK_DIR. Locally `Path(".") / "figures"`
+# Everything the example writes hangs off WORK_DIR. Locally `Path(".") / "figures"`
 # is `figures`, so local behaviour is unchanged.
 WORK_DIR = Path("/kaggle/working") if ON_KAGGLE else Path(".")
 
