@@ -11,6 +11,12 @@ export QUARTO_PYTHON := .venv/bin/python
 # certifi bundle, NOT the internal root CA. Exporting the internal CA replaces the
 # public trust store rather than adding to it, so with it set, S3 reads fail.
 #
+# render-html and render-pdf also fetch the Inter font from Google Fonts
+# (fonts.googleapis.com / fonts.gstatic.com, driven by _brand.yml) and render-pdf
+# fetches OSM map tiles. On-network the proxy intercepts those hosts and presents
+# the internal CA, so the combined bundle (below) is required for those targets;
+# the fetched font is then cached under .quarto/ and reused on later renders.
+#
 #   Public endpoints (S3, OSM tiles off-network) -- the usual case here:
 #     export SSL_CERT_FILE=$(.venv/bin/python -m certifi)
 #     export REQUESTS_CA_BUNDLE=$(.venv/bin/python -m certifi)
@@ -23,7 +29,7 @@ export QUARTO_PYTHON := .venv/bin/python
 
 .DEFAULT_GOAL := help
 
-.PHONY: help sync preview render-html render-notebook render-pdf render kaggle-render kaggle-upload clean
+.PHONY: help sync check-toolchain preview render-html render-notebook render-pdf render kaggle-render kaggle-upload clean
 
 help: ## Show this help message.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z_%-]+:.*##/ {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -31,6 +37,15 @@ help: ## Show this help message.
 sync: ## Build the uv virtual environment and register the Jupyter kernel.
 	uv sync
 	uv run python -m ipykernel install --user --name python3 --display-name "H2O examples"
+
+check-toolchain: ## Verify Quarto, the bundled Typst compiler, and the kernel.
+	# Run after `make sync` (the devcontainer does both on create). The jupyter
+	# check reads QUARTO_PYTHON, exported above, so it probes the uv venv.
+	# `quarto typst` resolves the compiler Quarto bundles for --to typst; if this
+	# fails, `make render-pdf` has no PDF backend.
+	quarto check install
+	quarto check jupyter
+	quarto typst --version
 
 preview: ## Live HTML preview with hot reload (re-renders on save).
 	H2O_RENDER_CONTEXT=dynamic quarto preview $(QMD) --to html
