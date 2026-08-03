@@ -37,12 +37,26 @@ fi
 SLUG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' \
         "$DATASET/dataset-metadata.json")"
 
+# The newest file timestamp Kaggle currently serves for this slug. Used as a
+# before/after marker: when it advances, the new version is the one being served.
+#
+# `datasets status` is NOT usable for this. It keeps reporting "ready" for the
+# version already published while the new one is still processing, so polling it
+# returns on the first call and tells you nothing.
+dataset_stamp() {
+  kaggle datasets files "$SLUG" --page-size 500 2>/dev/null \
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' \
+    | sort | tail -1
+}
+
 # `datasets status` exits non-zero (or reports an error) for a slug that does not
 # exist yet, which is how we tell a first upload from a refresh.
 if kaggle datasets status "$SLUG" >/dev/null 2>&1; then
+  BEFORE="$(dataset_stamp)"
   echo "==> versioning dataset $SLUG"
   kaggle datasets version -p "$DATASET" --dir-mode zip -m "$MESSAGE"
 else
+  BEFORE=""
   echo "==> creating dataset $SLUG"
   kaggle datasets create -p "$DATASET" --dir-mode zip
 fi
@@ -51,20 +65,22 @@ fi
 # asynchronously, and `kernels push` pins whatever version is current at push time.
 # Pushing straight away therefore attaches the PREVIOUS version -- which is how the
 # kernel came to run against a dataset with no h2o_examples/download_statistics.py
-# and fail on ModuleNotFoundError. Wait for the new version to go ready first.
-echo "==> waiting for $SLUG to finish processing"
+# and fail on ModuleNotFoundError. Wait for the served files to actually change.
+echo "==> waiting for $SLUG to serve the new version"
 ready=""
 for _ in $(seq 60); do
-  status="$(kaggle datasets status "$SLUG" 2>/dev/null || true)"
-  case "$status" in
-    *ready*) ready=1; break ;;
-    *error*) echo "error: dataset processing failed: $status" >&2; exit 1 ;;
-  esac
   sleep 10
+  now="$(dataset_stamp)"
+  if [ -n "$now" ] && [ "$now" != "$BEFORE" ]; then
+    ready=1
+    echo "    now serving files stamped $now"
+    break
+  fi
 done
 if [ -z "$ready" ]; then
-  echo "error: $SLUG did not report ready within 10 minutes -- not pushing the" >&2
-  echo "       notebook, it would attach the previous dataset version" >&2
+  echo "error: $SLUG still serves files stamped '$BEFORE' after 10 minutes --" >&2
+  echo "       not pushing the notebook, it would attach the previous version." >&2
+  echo "       Check https://www.kaggle.com/datasets/$SLUG and re-run." >&2
   exit 1
 fi
 

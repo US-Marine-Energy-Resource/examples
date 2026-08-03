@@ -51,6 +51,11 @@ rsync -a --exclude '__pycache__' --exclude '.DS_Store' \
 cp "$REPO/$WEC_LIBRARY" "$DATASET/$WEC_LIBRARY"
 cp "$HERE/dataset-metadata.json" "$DATASET/dataset-metadata.json"
 
+# Belt and braces: the rsync excludes above cover copied trees, but Finder drops
+# .DS_Store into any directory it is pointed at, including this one, between the
+# build and the upload. They were being published.
+find "$DATASET" -name .DS_Store -delete
+
 # --- notebook -----------------------------------------------------------------
 # Strip outputs (the rendered notebook is ~7.6 MB of embedded tables and figures;
 # on Kaggle the point is that the reader runs it) and normalize the kernelspec,

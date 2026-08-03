@@ -21,6 +21,49 @@ from pathlib import Path
 
 ON_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle/working").is_dir()
 
+# What the notebook needs on top of Kaggle's preinstalled scientific stack.
+# No -U anywhere below: Kaggle's numpy/pandas/scipy already satisfy mhkit's
+# floors and should be left alone.
+REQUIREMENTS = [
+    "mhkit[wave]==1.1.*",
+    "itables",
+    "folium",
+    "us-marine-energy-resource>=0.5.0",
+]
+
+
+def _install(requirements):
+    """Install `requirements` into Kaggle's system Python, preferring uv.
+
+    pip's backtracking resolver spends about ten minutes on this set against
+    Kaggle's preinstalled tree -- in the kernel log the wheels stop downloading
+    at 37s and the next one lands at 660s, and every second between is pip
+    trying candidate versions. uv resolves the same set in seconds.
+
+    uv is not preinstalled on Kaggle, but it is a single self-contained wheel,
+    so bootstrapping it costs a few seconds and pays that back many times over.
+    `python -m uv` rather than the `uv` script, so this does not depend on where
+    Kaggle puts console entry points on PATH.
+
+    Falls back to pip if any part of that fails: a slow notebook beats a broken
+    one, and the fallback is exactly the behaviour this replaced.
+    """
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "uv"], check=True
+        )
+        subprocess.run(
+            [sys.executable, "-m", "uv", "pip", "install", "-q", "--system",
+             *requirements],
+            check=True,
+        )
+        return
+    except (subprocess.CalledProcessError, OSError) as error:
+        print(f"uv install failed ({error}); falling back to pip", file=sys.stderr)
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", *requirements], check=True
+    )
+
 # Everything the example writes hangs off WORK_DIR. Locally `Path(".") / "figures"`
 # is `figures`, so local behaviour is unchanged.
 WORK_DIR = Path("/kaggle/working") if ON_KAGGLE else Path(".")
@@ -37,14 +80,7 @@ if ON_KAGGLE:
     # Select the existing `dynamic` preset -- live Folium map, interactive tables.
     # setdefault, never assignment: `make render-pdf` sets =png and must win.
     os.environ.setdefault("H2O_RENDER_CONTEXT", "dynamic")
-    # No -U: Kaggle's numpy/pandas/scipy already satisfy mhkit's floors and
-    # should be left alone.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q",
-         "mhkit[wave]==1.1.*", "itables", "folium",
-         "us-marine-energy-resource>=0.5.0"],
-        check=True,
-    )
+    _install(REQUIREMENTS)
     # Without the companion dataset every sea-state record is fetched from S3,
     # which takes hours on Kaggle's network. Fail now, with the fix, rather
     # than crawl.
