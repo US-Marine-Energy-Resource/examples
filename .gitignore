@@ -2,8 +2,10 @@
 # scrollable deliverable, alongside the Typst PDF. The .qmd is the Quarto source
 # of truth.
 
-# Derived-result cache (.cache/) pickles
+# Derived-result cache (.cache/): memoised pickles and the measured download
+# statistics the multi-point section writes on every render.
 *.pkl
+.cache/*.json
 
 # NLR API credentials (see .env.example). Never commit a populated .env.
 .env
