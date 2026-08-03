@@ -130,7 +130,6 @@ from us_marine_energy_resource import wave_hindcast
 from us_marine_energy_resource.wave_hindcast.errors import InvalidAttributeError
 
 from h2o_examples.cache import memoize_pickle
-from h2o_examples.download_statistics import download_statistics, write_json
 from h2o_examples.figures import FIG_DIR, FIG_WIDTH, plot_wave_matrix, savefig, show_table
 from h2o_examples.mapping import render_points_map_outputs
 from h2o_examples.points import PACWAVE_POINTS, make_points_map, point_coord
