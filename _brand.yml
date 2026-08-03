@@ -1,0 +1,19 @@
+# Typography for the rendered outputs (HTML and Typst/PDF).
+#
+# Inter is pulled from Google Fonts at render time (source: google) and wired into
+# both the HTML and the Typst PDF automatically -- no local font install and no
+# committed font binaries, so a render works the same on any machine. The fetched
+# font is cached under .quarto/, and the render needs network access the first time
+# (on a proxied network, the combined CA bundle applies -- see the Makefile TLS note).
+#
+# base + headings only; monospace is left at Quarto's default so code stays fixed
+# width. ipynb is not a brand-supported format (and notebook font is the viewer's),
+# so this affects the HTML and PDF deliverables.
+typography:
+  fonts:
+    - family: Inter
+      source: google
+    - family: Public Sans
+      source: google
+  base: Public Sans
+  headings: Inter
