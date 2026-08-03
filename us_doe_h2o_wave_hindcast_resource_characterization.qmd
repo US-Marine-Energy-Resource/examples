@@ -118,7 +118,9 @@ Open the notebook in a browser
 import inspect
 
 import calendar
+import textwrap
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -253,6 +255,27 @@ POINTS = {
     "US_PuertoRico_North_Shore": (18.60, -66.10, "N. of San Juan (open water)"),
     # add or remove points here
 }
+
+# --- Water depth per point [m] -------------------------------------------------
+# Read once from the hindcast's own `meta` table (the `water_depth` field at the
+# point's grid node, 2020 files) and recorded here as a constant rather than re-read
+# at render time: it is a property of the grid node, it never changes between runs,
+# and baking it in keeps the render offline-safe on Kaggle.
+#
+# It is not simply read from `df.attrs` because the package drops it. The S3 backend
+# looks for a `meta` field named `depth`, but the published files name it
+# `water_depth` (verified on West_Coast, Hawaii and Alaska), so the lookup misses and
+# the key silently never appears. Candidate package issue.
+#
+# The 67.7 m below is a good check on the source: PacWave publishes 65-78 m MLLW for
+# the South site (see h2o_examples/points.py), and the node agrees.
+# Points absent from this dict have an unknown depth and are treated as unconstrained.
+POINT_DEPTHS = {
+    "US_Oregon_PacWave_South": 67.7,        # published site depth 65-78 m MLLW
+    "US_California_San_Luis_Obispo": 14.0,  # 0.2 km from shore, nearshore node
+    "US_Hawaii_Oahu_WETS": 353.1,           # Hawaii's shelf drops off fast
+    "US_Alaska_Kodiak": 143.9,
+}
 ```
 
 ```{python}
@@ -274,7 +297,8 @@ POINTS_TO_COMPARE = [                         # drives the multi-point compariso
 # and color from points.py so the map can draw their berth boundaries.
 POINT_INFO = {}
 for _name, (_lat, _lng, _label) in POINTS.items():
-    POINT_INFO[_name] = {"lat": _lat, "lng": _lng, "label": _label}
+    POINT_INFO[_name] = {"lat": _lat, "lng": _lng, "label": _label,
+                         "depth": POINT_DEPTHS.get(_name)}
     if _name in PACWAVE_POINTS:
         POINT_INFO[_name]["corners"] = PACWAVE_POINTS[_name]["corners"]
         POINT_INFO[_name]["color"] = PACWAVE_POINTS[_name]["color"]
@@ -1831,6 +1855,219 @@ plot_window_contours(3)
 #| label: fig-contour-5yr
 #| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 5-year record (2016-2020), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 plot_window_contours(5)
+```
+
+# Multi-Point Device Comparison {#sec-multipoint-maep}
+
+@sec-aep put three modelled reference devices against one point; @sec-multipoint put
+several points against each other on resource alone. This section crosses the two: one
+MAEP per (point, device) pair, computed independently, with the RM3, RM5 and RM6 power
+matrices of @sec-aep and the 2020 records already loaded in @sec-multipoint.
+
+Each point's MAEP uses that point's *own* joint probability matrix, built exactly as
+@sec-jpd builds `frequency`: 0.5 m and 1 s IEC bins spanning that point's range. Sizing
+the grid to the point is what keeps the matrix a probability -- every sea state the
+point produced lands in a bin, so the matrix sums to one, which mhkit requires. The
+device matrix is then reindexed onto whichever grid it is handed, as in @sec-aep.
+
+```{python}
+def point_frequency(df):
+    """Joint probability matrix for one point, on that point's own bins."""
+    hm0_edges = np.arange(0, np.ceil(df.Hm0.max()) + 0.5, 0.5)
+    te_edges = np.arange(0, np.ceil(df.Te.max()) + 1, 1)
+    # Centers, not edges -- see the note in @sec-jpd.
+    return performance.wave_energy_flux_matrix(
+        df.Hm0, df.Te, df.J, "frequency",
+        (hm0_edges[:-1] + hm0_edges[1:]) / 2,
+        (te_edges[:-1] + te_edges[1:]) / 2,
+    )
+
+
+point_frequencies = {n: point_frequency(point_data[n]) for n in point_order}
+
+# One MAEP per (point, device) pair, each its own calculation. Rows are points in
+# point_order (richest resource first), columns are devices, values MWh/yr.
+point_labels = [POINT_INFO[n]["label"] for n in point_order]
+maep = pd.DataFrame(
+    {
+        device: [device_maep(matrix, point_frequencies[n]) / 1e3 for n in point_order]
+        for device, matrix in POWER_MATRICES.items()
+    },
+    index=point_labels,
+)
+
+rated = pd.Series({d: m.to_numpy().max() for d, m in POWER_MATRICES.items()})
+capacity_factor = maep * 1e3 / (rated * 8766)          # aligns on the device columns
+best_point = maep.div(maep.max(axis=0), axis=1) * 100  # % of each device's best point
+
+# --- Can the device physically go there? --------------------------------------
+# A surge flap is referenced to the seabed and stands in the water column, so the
+# water depth has to be close to the flap's own height -- a 25 m flap in 350 m of
+# water is not a worse device, it is not a device. The library's Characteristic
+# Diameter is that height, and DEPTH_TOLERANCE is how far from it a point may sit.
+# The heaving buoy and the OWC float, so any depth that moors them will do; only
+# technologies matched below carry the constraint.
+DEPTH_TOLERANCE = 0.20
+SEABED_REFERENCED = "Surge"  # matched against the library's Technology Type
+
+
+def depth_band(device):
+    """Workable water depth (min, max) [m], or None where depth does not constrain."""
+    spec = _specs.loc[device]
+    if SEABED_REFERENCED not in spec["Technology Type"]:
+        return None
+    size = float(spec["Characteristic Diameter"])
+    return size * (1 - DEPTH_TOLERANCE), size * (1 + DEPTH_TOLERANCE)
+
+
+def installable(device, point):
+    """Can `device` physically be installed at `point`? Unknown depth is not a no."""
+    band = depth_band(device)
+    depth = POINT_INFO[point]["depth"]
+    if band is None or depth is None:
+        return True
+    return band[0] <= depth <= band[1]
+
+
+# Same shape as `maep`, so every figure can mask straight off it.
+installable_at = pd.DataFrame(
+    {d: [installable(d, n) for n in point_order] for d in POWER_MATRICES},
+    index=point_labels,
+)
+point_depths = pd.Series([POINT_INFO[n]["depth"] for n in point_order],
+                         index=point_labels)
+
+# Points keep the colors they carry everywhere else in this notebook; devices get a
+# separate palette so a device bar is never mistaken for a point bar.
+label_colors = {POINT_INFO[n]["label"]: point_colors[n] for n in point_order}
+device_colors = dict(
+    zip(POWER_MATRICES, sns.color_palette("Set2", len(POWER_MATRICES)))
+)
+```
+
+```{python}
+#| label: tbl-multipoint-maep
+#| tbl-cap: "Mean annual energy production [MWh/yr] for each modelled reference device at each compared point, from each point's 2020 joint probability matrix, with the water depth at each point's grid node. A dagger marks a device that cannot physically be installed at that depth; its energy is still shown. Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+maep_table = maep.round(1).astype(str).mask(~installable_at, maep.round(1).astype(str) + " †")
+maep_table.insert(0, "Depth [m]", point_depths.round(1))
+show_table(maep_table)
+```
+
+## MAEP by Point and by Device
+
+The same numbers, grouped two ways. @fig-multipoint-maep-by-point puts one group per
+point and answers "at this point, which device earns most". @fig-multipoint-maep-by-device
+puts one group per device and answers "for this device, which point earns most". Both
+axes are linear: a log axis would flatten exactly the magnitude gap between points that
+this comparison exists to show.
+
+Grey, hatched bars are combinations that the water depth rules out. RM5 is an
+oscillating surge flap: it is referenced to the seabed and stands in the water column,
+so it needs a depth close to its own 25 m height (the library's Characteristic
+Diameter), and `DEPTH_TOLERANCE` allows 20 m to 30 m. None of the four points sit in
+that band -- San Luis Obispo is too shallow at 14 m, and PacWave South, Kodiak and WETS
+are 67.7 m, 143.9 m and 353.1 m -- so every RM5 bar here is greyed. RM3 and RM6 both
+float, so depth only has to moor them and neither is constrained.
+
+The greyed bars still carry their computed height, deliberately. The arithmetic is
+sound -- that is genuinely the energy the flap's power matrix and the point's sea states
+imply -- and showing it keeps the resource comparison legible while making clear that
+the number is not a deployment. A device that cannot be installed earns nothing,
+whatever its matrix says.
+
+::: {.callout-note}
+The reference-model power matrices stop at $H_{m0}$ 9.75 m and $T_e$ 20.5 s, and a point
+that produces sea states past that earns nothing from them -- the grey, non-overlapping
+region of @fig-maep-contribution-rm3. That limit does not bind for the points and the
+year compared here: every point's bins fall inside the device grid, so the numbers below
+are set by where each device *produces*, not by where its matrix runs out. It would bind
+on a longer or more energetic record, and a low MAEP is worth checking against the
+device's envelope before reading it as a statement about the resource.
+:::
+
+```{python}
+def grouped_bars(frame, colors, ylabel, name, fmt="%.0f", height=4.5, mask=None):
+    """Grouped vertical bars: one x group per row of `frame`, one bar per column.
+
+    `mask` is a boolean frame shaped like `frame`; False draws the bar grey and
+    hatched instead of in its own color. The bar keeps its height -- the energy is
+    real arithmetic, it is the installation that is not possible.
+    """
+    groups, series = list(frame.index), list(frame.columns)
+    x = np.arange(len(groups))
+    width = 0.8 / len(series)
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, height))
+    for i, name_ in enumerate(series):
+        offset = (i - (len(series) - 1) / 2) * width
+        ok = (np.ones(len(groups), bool) if mask is None
+              else mask[name_].to_numpy().astype(bool))
+        bars = ax.bar(
+            x + offset, frame[name_].to_numpy(), width, label=name_,
+            color=[colors[name_] if good else "0.88" for good in ok],
+            edgecolor=["none" if good else "0.55" for good in ok],
+        )
+        for bar, good in zip(bars, ok):
+            if not good:
+                bar.set_hatch("///")
+        ax.bar_label(bars, fmt=fmt, padding=2, fontsize=7, color="0.25")
+    ax.set_xticks(x)
+    # Wrap at spaces rather than rotating: point labels like "Kodiak (open water)"
+    # collide at this width, and a rotated categorical axis reads worse than two lines.
+    ax.set_xticklabels(["\n".join(textwrap.wrap(str(g), 14)) for g in groups])
+    ax.set_ylabel(ylabel)
+    ax.margins(y=0.16)  # headroom so the tallest bar's label is not clipped
+    # Proxy handles, so a series keeps its own color in the legend even when its
+    # first bar happens to be a greyed one.
+    handles = [Patch(facecolor=colors[s]) for s in series]
+    labels_ = list(series)
+    if mask is not None and not mask.to_numpy().all():
+        handles.append(Patch(facecolor="0.88", edgecolor="0.55", hatch="///"))
+        labels_.append("not installable\nat this depth")
+    ax.legend(handles, labels_, loc="upper left", bbox_to_anchor=(1.02, 1),
+              borderaxespad=0)
+    fig.tight_layout()
+    savefig(name)
+```
+
+```{python}
+#| label: fig-multipoint-maep-by-point
+#| fig-cap: "Mean annual energy production per point, one bar per modelled reference device (2020). Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+grouped_bars(maep, device_colors, "MAEP [MWh/yr]", "multipoint_maep_by_point",
+             mask=installable_at)
+```
+
+```{python}
+#| label: fig-multipoint-maep-by-device
+#| fig-cap: "Mean annual energy production per modelled reference device, one bar per point (2020). Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+grouped_bars(maep.T, label_colors, "MAEP [MWh/yr]", "multipoint_maep_by_device",
+             mask=installable_at.T)
+```
+
+## Normalized Comparisons
+
+MAEP mixes resource with device size, so the two figures above rank a large device above
+a small one wherever it is placed. @fig-multipoint-capacity-factor divides that out:
+MAEP against what the device would make running at its rated power for the whole average
+year (the same 8766 h and the same rating -- the matrix maximum -- used in
+@tbl-device-maep). It reads as utilization, and is comparable across devices of different
+size.
+
+@fig-multipoint-maep-normalized normalizes the other way, expressing each device's MAEP
+as a percentage of its own best point. Device scale drops out entirely, leaving only how
+much a device gives up by moving.
+
+```{python}
+#| label: fig-multipoint-capacity-factor
+#| fig-cap: "Capacity factor -- MAEP against rated power over an 8766 h average year -- per modelled reference device, one bar per point (2020). Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+grouped_bars(capacity_factor.T, label_colors, "Capacity factor",
+             "multipoint_capacity_factor", fmt="%.2f", mask=installable_at.T)
+```
+
+```{python}
+#| label: fig-multipoint-maep-normalized
+#| fig-cap: "Mean annual energy production as a percentage of each modelled reference device's own best point, one bar per point (2020). Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+grouped_bars(best_point.T, label_colors, "MAEP [% of device best point]",
+             "multipoint_maep_normalized", mask=installable_at.T)
 ```
 
 # References {.unnumbered}
