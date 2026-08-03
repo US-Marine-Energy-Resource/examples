@@ -133,22 +133,22 @@ def render_map_outputs(
     return artifacts
 
 
-def render_sites_map_outputs(
-    sites: Mapping[str, Mapping[str, Any]],
+def render_points_map_outputs(
+    points: Mapping[str, Mapping[str, Any]],
     folium_map_factory: Callable[[Mapping[str, Mapping[str, Any]]], Any],
     *,
     output_dir: str | Path,
-    stem: str = "sites_map",
+    stem: str = "points_map",
     context: str | Mapping[str, Any] | MapRenderContext | None = None,
-    title: str = "US marine energy test sites",
+    title: str = "US marine energy resource assessment points",
 ) -> dict[str, Path]:
-    """Render the examples' site map through the shared context interface."""
+    """Render the examples' point map through the shared context interface."""
 
-    folium_map = folium_map_factory(sites)
+    folium_map = folium_map_factory(points)
 
     def png_renderer(path: Path, render_context: MapRenderContext) -> None:
-        render_sites_png(
-            sites,
+        render_points_png(
+            points,
             path,
             title=title,
             dpi=render_context.png_dpi,
@@ -166,11 +166,11 @@ def render_sites_map_outputs(
     )
 
 
-def render_sites_png(
-    sites: Mapping[str, Mapping[str, Any]],
+def render_points_png(
+    points: Mapping[str, Mapping[str, Any]],
     output_path: str | Path,
     *,
-    title: str = "US marine energy test sites",
+    title: str = "US marine energy resource assessment points",
     tile_url: str = OSM_TILE_URL,
     timeout: int = 20,
     ssl_context: ssl.SSLContext | None = None,
@@ -178,7 +178,7 @@ def render_sites_png(
     figsize: tuple[float, float] = (11, 6.5),
     zoom: int | None = None,
 ) -> Path:
-    """Render site points and boundaries to a static Web Mercator PNG.
+    """Render points and boundaries to a static Web Mercator PNG.
 
     Tiles are fetched from the configured URL at render time. SSL/network errors
     are surfaced as ``MapTileFetchError`` so they are visible instead of silently
@@ -186,7 +186,7 @@ def render_sites_png(
     """
 
     output_path = Path(output_path)
-    west, south, east, north = _site_lonlat_bounds(sites)
+    west, south, east, north = _point_lonlat_bounds(points)
     west, south, east, north = _pad_lonlat_bounds(west, south, east, north)
     zoom = zoom or _choose_zoom(west, south, east, north, figsize, dpi)
 
@@ -202,7 +202,7 @@ def render_sites_png(
         timeout=timeout,
         ssl_context=ssl_context,
     )
-    _draw_site_vectors(ax, sites)
+    _draw_point_vectors(ax, points)
 
     left, bottom = lonlat_to_web_mercator(west, south)
     right, top = lonlat_to_web_mercator(east, north)
@@ -239,15 +239,15 @@ def _display_outputs(
         display(folium_map)
 
 
-def _site_lonlat_bounds(
-    sites: Mapping[str, Mapping[str, Any]],
+def _point_lonlat_bounds(
+    points: Mapping[str, Mapping[str, Any]],
 ) -> tuple[float, float, float, float]:
     lats: list[float] = []
     lons: list[float] = []
-    for site in sites.values():
-        lats.append(float(site["lat"]))
-        lons.append(float(site["lng"]))
-        for corner in site.get("corners", {}).values():
+    for point in points.values():
+        lats.append(float(point["lat"]))
+        lons.append(float(point["lng"]))
+        for corner in point.get("corners", {}).values():
             lats.append(float(corner["lat"]))
             lons.append(float(corner["lng"]))
     return min(lons), min(lats), max(lons), max(lats)
@@ -324,20 +324,20 @@ def _draw_tiles(
             )
 
 
-def _draw_site_vectors(ax: plt.Axes, sites: Mapping[str, Mapping[str, Any]]) -> None:
-    for site in sites.values():
-        color = site.get("color", "#2563eb")
-        if "corners" in site:
+def _draw_point_vectors(ax: plt.Axes, points: Mapping[str, Mapping[str, Any]]) -> None:
+    for point in points.values():
+        color = point.get("color", "#2563eb")
+        if "corners" in point:
             polygon = [
-                _project_corner(corner) for corner in _ordered_corners(site["corners"])
+                _project_corner(corner) for corner in _ordered_corners(point["corners"])
             ]
             polygon.append(polygon[0])
             xs, ys = zip(*polygon)
             ax.fill(xs, ys, color=color, alpha=0.18, zorder=4)
             ax.plot(xs, ys, color=color, linewidth=2.0, zorder=5)
 
-    for site in sites.values():
-        x, y = lonlat_to_web_mercator(float(site["lng"]), float(site["lat"]))
+    for point in points.values():
+        x, y = lonlat_to_web_mercator(float(point["lng"]), float(point["lat"]))
         ax.scatter(
             [x],
             [y],
@@ -348,7 +348,7 @@ def _draw_site_vectors(ax: plt.Axes, sites: Mapping[str, Mapping[str, Any]]) -> 
             linewidth=1.2,
             zorder=6,
         )
-        label = str(site["label"])
+        label = str(point["label"])
         text = ax.annotate(
             label,
             (x, y),

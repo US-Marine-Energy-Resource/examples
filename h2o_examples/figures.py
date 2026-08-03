@@ -8,9 +8,8 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import seaborn as sns
-
-from matplotlib.ticker import MultipleLocator
 
 from h2o_examples.environment import WORK_DIR
 
@@ -35,13 +34,30 @@ def savefig(name):
     plt.show()
 
 
-def plot_wave_matrix(matrix, zlabel, figsize=None, fmt=".2f", buffer=1):
+def plot_wave_matrix(
+    matrix,
+    zlabel,
+    figsize=None,
+    fmt=".2f",
+    buffer=1,
+    suffix="%",
+    annotate=True,
+    annot_fontsize=9,
+    blank_color=None,
+    xtick_fmt="{:.0f}",
+    ytick_fmt="{:.1f}",
+):
     """Heatmap of a sea-state matrix (Te on columns, Hm0 on the index).
 
+    `matrix` is indexed by bin *centers* -- mhkit's convention, since
+    `performance.wave_energy_flux_matrix` converts the arrays it is handed from
+    centers to edges internally. Ticks are therefore drawn on the bin edges,
+    midway between consecutive centers, so a label marks a boundary instead of
+    sitting in the middle of a cell. That means one more tick than cells.
+
     Empty bins are blanked and the axes are cropped to the populated bins plus
-    a one-bin `buffer` on each side. Light minor gridlines fall on the bin
-    edges. Adapted from the EMEC/PacWave proficiency-testing capture-matrix
-    plot.
+    a one-bin `buffer` on each side. Light gridlines fall on the labelled edges.
+    Adapted from the EMEC/PacWave proficiency-testing capture-matrix plot.
     """
     m = matrix.replace(0, np.nan)
 
@@ -52,16 +68,54 @@ def plot_wave_matrix(matrix, zlabel, figsize=None, fmt=".2f", buffer=1):
     c0, c1 = max(cols.min() - buffer, 0), min(cols.max() + buffer, m.shape[1] - 1)
     m = m.iloc[r0 : r1 + 1, c0 : c1 + 1].sort_index(ascending=False)  # Hm0 up
 
-    plt.figure(figsize=figsize or (FIG_WIDTH, FIG_WIDTH))
+    # `annotate=False` leaves the cells bare, for a version that reads as a shape
+    # rather than a table. None is seaborn's "no annotations" sentinel.
+    annot = None
+    if annotate:
+        annot = m.apply(
+            lambda col: col.map(
+                lambda v: "" if pd.isna(v) else format(v, fmt) + suffix
+            )
+        )
+
+    plt.figure(figsize=figsize or (FIG_WIDTH + 1, FIG_WIDTH - 2))
     ax = sns.heatmap(
-        m, annot=True, fmt=fmt, cmap="viridis", cbar_kws={"label": zlabel}
+        m,
+        annot=annot,
+        fmt="",
+        cmap="viridis",
+        annot_kws={"fontsize": annot_fontsize},
+        cbar_kws={"label": zlabel},
     )
-    # Minor ticks sit on the bin edges (between the centered cells) -> grid there.
+    # Blank cells are transparent, so the axes background is what shows through.
+    # Set it explicitly to grey out bins with no value rather than relying on
+    # whatever the active theme happens to use.
+    if blank_color is not None:
+        ax.set_facecolor(blank_color)
+
+    # Cell j spans [j, j+1] in heatmap coordinates, so the bin edges are the
+    # integers 0..n. Convert the centers to edges by stepping half a bin: the
+    # index runs high -> low, so position i is that cell's upper edge.
+    def edge_labels(values, descending=False):
+        step = abs(values[1] - values[0]) if len(values) > 1 else 1.0
+        half = step / 2
+        if descending:
+            return [v + half for v in values] + [values[-1] - half]
+        return [v - half for v in values] + [values[-1] + half]
+
+    ax.set_xticks(np.arange(len(m.columns) + 1))
+    ax.set_xticklabels(
+        [xtick_fmt.format(v) for v in edge_labels(list(m.columns))], rotation=0
+    )
+    ax.set_yticks(np.arange(len(m.index) + 1))
+    ax.set_yticklabels(
+        [ytick_fmt.format(v) for v in edge_labels(list(m.index), descending=True)],
+        rotation=0,
+    )
+
+    # Gridlines now coincide with the labelled edges.
     ax.grid(False)
-    ax.minorticks_on()
-    ax.xaxis.set_minor_locator(MultipleLocator(1.0))
-    ax.yaxis.set_minor_locator(MultipleLocator(1.0))
-    ax.grid(which="minor", color="#dddddd", linewidth=0.6)
+    ax.grid(which="major", color="#dddddd", linewidth=0.6)
     ax.set_xlabel("Energy Period, $T_e$ [s]")
     ax.set_ylabel("Significant Wave Height, $H_{m0}$ [m]")
     plt.tight_layout()
