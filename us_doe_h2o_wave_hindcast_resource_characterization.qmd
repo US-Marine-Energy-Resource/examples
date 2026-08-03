@@ -3,6 +3,7 @@ title: "U.S. DOE H2O Wave Hindcast"
 subtitle: "Open-Source Data Resource Characterization Example"
 number-sections: true
 bibliography: references.bib
+
 # Include every references.bib entry in the reference list, cited or not.
 nocite: |
   @*
@@ -25,24 +26,31 @@ execute:
 jupyter: python3
 ---
 
-This document characterizes the wave energy resource at U.S. marine energy test
-sites using the U.S. DOE WPTO High-Resolution Wave Hindcast. Data access goes
-through the
-[`us-marine-energy-resource`](https://pypi.org/project/us-marine-energy-resource/)
-package, which finds the hindcast grid node nearest a coordinate and downloads its
-record. The analysis covers aggregate statistics, monthly climatology, joint
-probability, extreme sea states, exceedance, directionality, and a multi-site
-comparison, using [MHKiT](https://mhkit-software.github.io/MHKiT/) for the wave
-calculations.
+This example characterizes the wave energy resource at U.S. marine energy resource assessment points
+using the U.S. DOE H2O High-Resolution Wave Hindcast.  Data is accessed using through the
+[`us-marine-energy-resource`](https://pypi.org/project/us-marine-energy-resource/) library, which
+finds the hindcast grid node nearest a user supplied coordinate and downloads its record. The data
+source is [MHKDR Submission 326: High Resolution Ocean Surface Wave Hindcast (US Wave)
+Data](https://mhkdr.openei.org/submissions/326) and data is downloaded from [the H2O Hindcast
+OpenEI Data Lake](https://data.openei.org/s3_viewer?bucket=wpto-pds-us-wave). The underlying data is
+`.h5` files that are standardized from the original model output and are the datasource for the [NLR
+Marine Energy Atlas](https://maps.nrel.gov/marine-energy-atlas/data-viewer/data-library/layers?vL=68c955d8b12e9eb9d3c3fc55).
+This analysis covers aggregate statistics, monthly climatology, joint probability, extreme sea
+states, exceedance, directionality, and a multi point comparison, using
+[MHKiT](https://mhkit-software.github.io/MHKiT/) for the using the wave hindcast data.
 
-# Setup
+# Platform Setup
 
-Platform bootstrap (Kaggle detection, dependency install, cache seeding, output
-paths) lives in `h2o_examples/environment.py`; figure and table helpers live in
-`h2o_examples/figures.py`. Importing `environment` first matters: on Kaggle it
-installs dependencies before numpy/pandas are imported.
+This section setups this notebook code for multiple different notebook types including
+[Quarto](https://quarto.org/), [Jupyter Notebook](https://jupyter.org/), and
+[Kaggle](https://www.kaggle.com/code/andrewsimmsnlr/h2o-wave-hindcast-resource-characterization).
+Behind the scenes each of these outputs has different ways for producing images, interactive
+elements (maps), and handling importing of bundled software. This section handles all of the behind
+the scenes to make each platform produce similar output and the details are in `h2o_examples/environment.py`.
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Setup platform specific python notebook configuration"
 import os
 import sys
 from pathlib import Path
@@ -65,9 +73,51 @@ elif os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
 from h2o_examples.environment import CACHE_DIR
 ```
 
+# Python Preamble
+
+This section handles all of the python library initialization and specific initialization for
+downloading, caching, analyzing and visualizing the wave hindcast data.
+
+## Local User Setup
+
+This example leverages [`uv`](https://docs.astral.sh/uv/) for installing python packages and environments. This is setup
+automatically on some platforms, but some platforms will need to install python and its
+dependencies:
+
+### Clone the repository
+
+```
+git clone https://github.com/US-Marine-Energy-Resource/examples
+```
+
+### Install `uv`
+
+[UV Installation Instructions](https://docs.astral.sh/uv/getting-started/installation/)
+
+### Install dependencies
+
+```
+uv sync
+```
+
+### Start Jupyter Notebook (local users only)
+
+[Using `uv` with Jupyter](https://docs.astral.sh/uv/guides/integration/jupyter/)
+
+```
+uv run --with jupyter jupyter lab
+```
+
+Open the notebook in a browser
+
+## Python Library Imports
+
 ```{python}
+#| code-fold: true
+#| code-summary: "Import the scientific stack, MHKiT, the wave-hindcast package, and the example helpers."
 import inspect
 
+import calendar
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -78,106 +128,230 @@ from us_marine_energy_resource import wave_hindcast
 from us_marine_energy_resource.wave_hindcast.errors import InvalidAttributeError
 
 from h2o_examples.cache import memoize_pickle
+from h2o_examples.download_statistics import download_statistics, write_json
 from h2o_examples.figures import FIG_DIR, FIG_WIDTH, plot_wave_matrix, savefig, show_table
-from h2o_examples.mapping import render_sites_map_outputs
-from h2o_examples.sites import WAVE_ENERGY_TEST_SITES, make_sites_map, site_lat_lng
+from h2o_examples.mapping import render_points_map_outputs
+from h2o_examples.points import PACWAVE_POINTS, make_points_map, point_coord
 ```
 
-# Wave Energy Test Sites {#sec-sites}
+# Wave Resource Assessment Specification {#sec-config}
 
-The sites live in `h2o_examples/sites.py`, which holds their names, coordinates,
-the published PacWave corner provenance, and the folium map helpers. This document
-works from a name and a `latitude, longitude` pair.
+This section defines the point level inputs to download time-series data from the H2O wave hindcast.
+
+## Inputs
+
+The user needs to provide 3 inputs, 
+
+* Coordinates as lat/lon decimal 
+  * Within the modeled area
+* Years
+    * 1979 to 2020 
+* Variables
+  * Full list below
+
+### Coordinates
+
+Coordinates must be supplied as decimal latitude and longitude:
+
+* Humboldt Bay: 
+  * Latitude: `40.8418`
+  * Longitude: `-124.2480`
+
+Note: The model resolution more detailed near the shore, and coordinate precision of 3-6 decimal
+places (approximately 110m to 11cm) is reasonable for the level of precision within the underlying
+model. Internally the `get_data_at_point` function will select the closest point to the user specified
+coordinates and reports how far the user input point is from the modeled point. Modeled points are
+fixed for the 42 year hindcast.
+
+
+```python
+humboldt_bay = {
+    "lat": 40.8398,
+    "lon": -124.25,
+}
+
+# Simplified example, downloads most recent year, all variables
+df = wave_hindcast.get_data_at_point(humboldt_bay["lat"], humboldt_bay["lon"], years=[2020],
+variables=["significant_wave_height", "energy_period"])
+```
+
+### Years
+* Year Range
+  * 1979 to 2020 (Hawaii and Atlantic are up to 2010)
+
+### Variables
+
+The following variables can be specified using the Hindcast Variable Id. Variables map directly to the underlying [SWAN models "Bulk Parameters"](https://swanmodel.sourceforge.io/online_doc/swanuse/node35.html).
+
+| Name                        | SWAN Name | Symbol           | Units                                  | Hindcast Variable Id          | Description                                                                        |
+| ---                         | ---       | ---              | ---                                    | ---                           | ---                                                                                |
+| Significant Wave Height     | `HSIGN`   | $H_{m_0}$        | meters                                 | `significant_wave_height`     | Significant wave height                                                            |
+| Energy Period               | `TMM10`   | $T_e$, $T_{-10}$ | seconds                                | `energy_period`               | Energy period                                                                      |
+| Omni-Directional Wave Power |           | $J$              | watts per meter                        | `omni-directional_wave_power` | Omnidirectional wave power                                                         |
+| Mean Wave Direction         | `DIR`     |                  | from degrees clockwise from true north | `mean_wave_direction`         | Mean wave direction                                                                |
+| Peak Period                 | `RTP`     | $T_p$            | seconds                                | `peak_period`                 | Relative peak period of the variance density spectrum (in the absence of currents) |
+| Maximum Energy Direction    |           | $\theta_J$       | from degrees clockwise from true north | `maximum_energy_direction`    | Direction of maximum wave energy                                                   |
+| Directionality Coefficient  |           | $d$              | unitless, range from 0 to 1            | `directionality_coefficient`  | Directionality coefficient                                                         |
+| Spectral Width              |           | $\epsilon_0$     | nitless, range from 0 to 1             | `spectral_width`              | Spectral Width                                                                     |
+
+
+Note: Symbol are defined in IEC 62600-101, which the standard calls "parameters".
+
+### Additional Variables
+
+The following variables can be specified using the Hindcast Variable Id. Variables are map directly the SWAN model "Bulk Parameters".
+
+| Name                               | SWAN Name | Symbol          | Units                                  | Hindcast Variable Id        | Description                                          |
+| ---                                | ---       | ---             | ---                                    | ---                         | ---                                                  |
+| Mean Period                        | `PER`     |                 | seconds                                | `mean_average_period`       | Mean absolute wave period, equivalent to $T_{m_{01}} |
+| Mean Absolute Zero Crossing Period | `TM02`    | $T_z$, $T_{02}$ | seconds                                | `mean_zero_crossing_period` | Mean absolute zero crossing period                   |
+| Peak Wave Direction                | `PDIR`    |                 | from degrees clockwise from true north | `peak_wave_direction`       | Peak wave direction, determined by wave power        |
+
+### Metadata
+
+For each point there an associated metadata entry in the hindcast data identifies non time varying data.
+
+| Name         | SWAN Name | Symbol | Units                     | Hindcast Variable Id |
+| ---          | ---       | ---    | ---                       | ---                  |
+| X Coordinate | `XP`      |        | decimal degrees longitude | `longitude`          |
+| Y Coordinate | `YP`      |        | decimal degrees latitude  | `latitude`           |
+| Depth        | `DEPTH`   | `h`    | meters                    | `depth`              |
+
+
+## Selected Coordinates
+
+The H2O wave hindcast is a has an underlying unstructured grid that follows the coast. The underlying model provides latitude and longitude coordinates for each result. Behind the scenes the wpto_hindcast module
+selects the nearest model grid node and returns that node's time series data. The node's
+position, index (`gid`), and distance from the requested coordinate are returned as additional 
+data (@sec-exploring).
 
 ```{python}
-_ = render_sites_map_outputs(WAVE_ENERGY_TEST_SITES, make_sites_map, output_dir=FIG_DIR)
+# --- Assessment coordinates (edit me) -----------------------------------------
+# name -> (latitude, longitude, label). PacWave South/North take their centerpoints
+# from the published corners in h2o_examples/points.py; the rest are inline.
+_pw_s = PACWAVE_POINTS["US_Oregon_PacWave_South"]
+_pw_n = PACWAVE_POINTS["US_Oregon_PacWave_North"]
+
+POINTS = {
+    "US_Oregon_PacWave_South": (_pw_s["lat"], _pw_s["lng"], "PacWave South"),
+    "US_Oregon_PacWave_North": (_pw_n["lat"], _pw_n["lng"], "PacWave North"),
+    "US_Hawaii_Oahu_WETS": (21.46488, -157.751524, "WETS"),
+    # The Atlantic 2011 to 202 points are chunked (12, 10294) and are impossible to download efficiently.
+    # Every other domain is (1500, 500)
+    # An atlantic year touches 243 scattered chunks instead of 2 -- ~120 MB per variable-year
+    # against 5.8, and minutes rather than seconds. Both omitted below.
+    "US_North_Carolina_Jenettes_Pier": (35.91036, -75.59239, "Jennette's Pier"),
+    "US_North_Carolina_Pioneer_WEC": (35.943117, -74.88035, "Pioneer WEC"),
+    "US_California_Scripps_Pier": (32.867633, -117.263167, "Scripps Pier"),
+    "US_California_San_Luis_Obispo": (
+        35.1672960606959,
+        -120.740349224586,
+        "San Luis Obispo",
+    ),
+    "US_California_Humboldt_Bay": (40.8398, -124.25, "Humboldt Bay"),
+    "US_Alaska_Kodiak": (57.0, -152.5, "Kodiak (open water)"),
+    "US_PuertoRico_North_Shore": (18.60, -66.10, "N. of San Juan (open water)"),
+    # add or remove points here
+}
 ```
 
-Every site as a lat/lon pair (@tbl-site-coordinates). For the two PacWave sites
+```{python}
+
+# --- Selection: which points drive which analysis ----------------------------
+SELECTED_POINT = "US_Oregon_PacWave_South"   # drives the single-point analysis
+POINTS_TO_COMPARE = [                         # drives the multi-point comparison
+    "US_Oregon_PacWave_South",                 # West_Coast
+    "US_California_San_Luis_Obispo",           # West_Coast
+    "US_Hawaii_Oahu_WETS",                     # Hawaii
+    "US_Alaska_Kodiak",                        # Alaska
+]  
+
+```
+
+```{python}
+# --- Working point dict, built from POINTS -------------------------------------
+# Coordinates come from POINTS; PacWave points also carry their polygon geometry
+# and color from points.py so the map can draw their berth boundaries.
+POINT_INFO = {}
+for _name, (_lat, _lng, _label) in POINTS.items():
+    POINT_INFO[_name] = {"lat": _lat, "lng": _lng, "label": _label}
+    if _name in PACWAVE_POINTS:
+        POINT_INFO[_name]["corners"] = PACWAVE_POINTS[_name]["corners"]
+        POINT_INFO[_name]["color"] = PACWAVE_POINTS[_name]["color"]
+
+# Single-point identity, derived from the selection above. Quarto renders these
+# inline in the narrative below (e.g. `{python} POINT_LABEL`). Figure captions name
+# the point literally, because Quarto does not evaluate inline code in a `fig-cap`;
+# if you change SELECTED_POINT, update the single-point captions to match. Captions
+# name YEAR and CONTOUR_YEARS literally too, for the same reason.
+lat_lon = point_coord(POINT_INFO[SELECTED_POINT])
+POINT_LABEL = POINT_INFO[SELECTED_POINT]["label"]
+POINT_COORDS = f"{lat_lon[0]:.4f}, {lat_lon[1]:.4f}"
+```
+
+Every point as a lat,lon pair (@tbl-point-coordinates). For the two PacWave points
 this is the centerpoint computed from the published corners. The `Domain` column
 is resolved from the coordinates by `wave_hindcast.describe_point`, an offline
-lookup against the hindcast's grid-node index. It needs no download and no API key.
+lookup against the hindcast's grid-node index. It needs no download and no API key and directly
+access data stored in [OpenEI AWS S3 Storage](https://data.openei.org/s3_viewer?bucket=wpto-pds-us-wave).
 
 ```{python}
-#| label: tbl-site-coordinates
-#| tbl-cap: "Wave energy test sites and their hindcast domains"
-site_coordinates = pd.DataFrame(
+#| label: tbl-point-coordinates
+#| tbl-cap: "Wave resource assessment points and their hindcast domains"
+point_coordinates = pd.DataFrame(
     [
         {
-            "Site": name,
-            "Label": site["label"],
-            "Domain": wave_hindcast.describe_point(*site_lat_lng(site))["domain"],
-            "Latitude": site["lat"],
-            "Longitude": site["lng"],
+            "Point": name,
+            "Label": point["label"],
+            "Domain": wave_hindcast.describe_point(*point_coord(point))["domain"],
+            "Latitude": point["lat"],
+            "Longitude": point["lng"],
         }
-        for name, site in WAVE_ENERGY_TEST_SITES.items()
+        for name, point in POINT_INFO.items()
     ]
 )
-show_table(site_coordinates)
+show_table(point_coordinates)
 ```
 
-# Downloading Data {#sec-downloading}
-
-We read the 3-hour bulk-parameter hindcast [@MHKDR_Dataset_326] through
-`wave_hindcast.get_data_at_point(lat, lon, ...)`, which finds the hindcast grid
-node nearest a coordinate and returns its record as a DataFrame. One query per
-site feeds every deliverable below, `mean_wave_direction` included.
-
-## Backends
-
-The dataset is large behind the scenes, with six domains, 42 years, and roughly
-80 GB of `.h5` per domain-year, so query only the years and variables you need.
-Two backends serve the data and the package picks between them by request size.
-The S3 backend reads the published files anonymously (free, no key, no request
-limits, but raw file access that downloads slowly at volume). The NLR API backend
-builds an archive server side (free API key required, suited to large pulls).
-Every query in this document is small enough to stay on S3, and every fetch is
-cached on disk under `~/.mer_wave_cache`, so repeat renders read from disk.
-
-## The same query from the command line
-
-The package installs a CLI. `--info` resolves the nearest grid node offline, with
-no download and no key:
+The first map (@fig-selected-point) visualizes only `SELECTED_POINT`.  The multi-point
+map appears with the comparison in @sec-multipoint.
 
 ```{python}
-# The `mer` executable lives next to the Python interpreter running this document.
-MER = Path(sys.executable).parent / "mer"
-!{MER} wave 44.5670,-124.2290 --info
+#| label: fig-selected-point
+#| fig-cap: "Selected point for the single-point analysis below"
+_ = render_points_map_outputs(
+    {SELECTED_POINT: POINT_INFO[SELECTED_POINT]},
+    make_points_map,
+    output_dir=FIG_DIR,
+    stem="selected_point_map",
+    title=POINT_LABEL,
+)
 ```
 
-A download looks like this. It is shown rather than run, because the Python cells
-below fetch the same data through the API (add `--dry-run` to see the plan without
-downloading):
+## Years
 
-```bash
-mer wave 44.5670,-124.2290 --years 2020 \
-    --variables significant_wave_height,energy_period,omni-directional_wave_power,mean_wave_direction,peak_period
-```
-
-## The Python query
+`YEAR` is the single-year record the single-point analysis reads; `CONTOUR_YEARS`
+is the multi-year record the extreme-value contours draw from (@sec-contour-records).
 
 ```{python}
-SELECTED_SITE = "US_Oregon_PacWave_South"
 YEAR = 2020  # the newest published year, served by the S3 backend in every domain
-lat_lon = site_lat_lng(WAVE_ENERGY_TEST_SITES[SELECTED_SITE])
-
-# Single source for the site's identity in prose. Quarto renders these inline in
-# the narrative below (e.g. `{python} SITE_LABEL`). Figure captions name the site
-# literally, because Quarto does not evaluate inline code inside a `fig-cap`; if
-# you change SELECTED_SITE, update the single-site captions to match.
-SITE_LABEL = WAVE_ENERGY_TEST_SITES[SELECTED_SITE]["label"]
-SITE_COORDS = f"{lat_lon[0]:.4f}, {lat_lon[1]:.4f}"
+CONTOUR_YEARS = [2016, 2017, 2018, 2019, 2020]  # multi-year record for contours
 ```
 
+## Variables
+
+The eight variables this example uses, in the hindcast dataset explicit variable names
+
 ```{python}
-# The five variables this document uses, in the dataset's canonical snake_case
-# spelling, and the short names they carry from here on.
 VARIABLES = [
     "significant_wave_height",
     "energy_period",
     "omni-directional_wave_power",
     "mean_wave_direction",
     "peak_period",
+    "maximum_energy_direction",
+    "directionality_coefficient",
+    "spectral_width",
 ]
 
 COLUMN_NAMES = {
@@ -186,13 +360,101 @@ COLUMN_NAMES = {
     "omni-directional_wave_power": "J",
     "mean_wave_direction": "Dir",
     "peak_period": "Tp",
+    "maximum_energy_direction": "MaxEDir",
+    "directionality_coefficient": "DirCoeff",
+    "spectral_width": "SpecWidth",
 }
+
+# The multi-year contour pull (@sec-contour-records) reads hm0 and te.
+CONTOUR_VARIABLES = ["significant_wave_height", "energy_period"]
 
 # Sentinel written into the data for timesteps the model did not produce.
 FILL_VALUE = -9.0
 ```
 
+# Downloading Data {#sec-downloading}
+
+We read the 3-hour bulk-parameter hindcast [@MHKDR_Dataset_326] through
+`wave_hindcast.get_data_at_point(lat, lon, ...)`, which finds the hindcast grid
+node nearest a coordinate and returns its record as a DataFrame.
+
+## Backends
+
+Two backends serve the data picks and the wpto_hindcast library selects the appropriate backed by
+request sizs. `get_data_at_point` allows 3 options, `auto`, `s3` and `api`.  `auto` mode switches
+from S3 to the API past 30 variable-years (n_variables * n_years). The S3 backend reads the
+published files anonymously (free, no key, no request limits, but raw file access that downloads
+slowly at volume). The NLR API backend builds an archive server side (free API key required, suited
+to large pulls).
+
+Every query in this example is intentionally small enough to query with S3 and
+`load_point` specifies `backend="s3"` to enforce this the api free backend queries.
+Every download is cached on disk under `~/.mer_wave_cache`, so repeat
+renders read from disk. It is possible to download a large volume of data for free from S3 but the
+queries are relatively slow vs the api backend.
+
+## The `mer` command-line application
+
+The `us-marine-energy-resource` package also installs a
+command-line application, `mer`, so the same workflow is available without writing Python.
+`mer` uses the same python under the hood and provides two commands
+`mer wave` and `mer tidal` to query the two U.S. DOE H2O hindcast datasets,
+`mer sources` lists the open-data sources, and `mer ls` / `mer info` / `mer explore`
+/ `mer download` browse and pull the raw files straight from `s3://wpto-pds-us-wave`.
+
+`mer wave <lat,lon>` finds the nearest grid node and, by default, fetches the four
+high-impact variables for the most recent served year -- a quick first look.
+`--info` resolves the node offline, with no download and no key:
+
 ```{python}
+# `mer` is installed by the package, normally next to the interpreter running this
+# example; fall back to PATH so this also works where the two differ (e.g. Kaggle).
+#
+# We run using subprocess rather than the `!` shell magic, and force plain text.
+
+import re
+import shutil
+import subprocess
+
+_mer = Path(sys.executable).parent / "mer"
+MER = str(_mer) if _mer.exists() else (shutil.which("mer") or "mer")
+_info = subprocess.run(
+    [MER, "wave", "44.5670,-124.2290", "--info"],
+    capture_output=True,
+    text=True,
+    # env={os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+    env={"NO_COLOR": "1", "TERM": "dumb"},
+)
+print(re.sub(r"\x1b\[[0-9;]*m", "", _info.stdout or _info.stderr))
+```
+
+The flags that define a `wave` query mirror the Python arguments used below:
+
+- `--years 2015-2020` and `--variables significant_wave_height,energy_period`
+  narrow the pull; `--all` fetches every variable and year (slow).
+- `--backend auto|s3|api` picks the source: `auto` reads small queries from S3 with
+  no key and switches to the NLR API for large ones (a free key past ~30
+  variable-years), while `s3` and `api` force the choice.
+- `--dry-run` prints the request without sending it, `--cache-only` keeps the result
+  in `~/.mer_wave_cache` without writing a CSV, and `--cache` / `--clear` /
+  `--clear-all` manage that cache.
+
+The download of the record used below looks like this (shown, not run -- the Python
+cells download it through the package instead):
+
+```bash
+mer wave 44.5670,-124.2290 --years 2020 \
+    --variables significant_wave_height,energy_period,omni-directional_wave_power,mean_wave_direction,peak_period
+```
+
+## The Python query
+
+`SELECTED_POINT`, `YEAR`, and `VARIABLES` come from the configuration section
+above. One query per point, through `load_point`, feeds every deliverable below.
+
+```{python}
+#| code-fold: true
+#| code-summary: "Define load_point: download, clean (drop fill values, cast to float64), and cache one point's record."
 def file_variable_names(requested, valid):
     """Map canonical dataset names onto one file's own spellings.
 
@@ -207,11 +469,15 @@ def file_variable_names(requested, valid):
     return [by_slug.get(slug(name), name) for name in requested]
 
 
-def load_site(name, years=(YEAR,)):
-    """Hm0/Te/J/Dir/Tp for one site via `wave_hindcast.get_data_at_point`.
+def load_point(name, years=(YEAR,), variables=None):
+    """One point's sea-state record via `wave_hindcast.get_data_at_point`.
+
+    `variables` defaults to the full `VARIABLES` set; pass a subset to download only
+    what an analysis consumes. Subsets cache under their own name, so the targeted
+    record and the full one coexist rather than shadowing each other.
 
     The year span is baked into the cache name so a one-year record and a
-    multi-year record of the same site never shadow each other in the package's
+    multi-year record of the same point never shadow each other in the package's
     cache. Pass `force=True` through to `get_data_at_point` to re-download.
 
     Returned as float64, and not as a harmless detail: five of mhkit's ten
@@ -220,22 +486,49 @@ def load_site(name, years=(YEAR,)):
     of type float` when handed float32, because `np.float32` is not a Python
     float — `np.float64` is. Casting once, here, keeps every method reachable.
     """
+    variables = list(VARIABLES if variables is None else variables)
     years = sorted(years)
     span = str(years[0]) if len(years) == 1 else f"{years[0]}-{years[-1]}"
-    lat_lon = site_lat_lng(WAVE_ENERGY_TEST_SITES[name])
-    query = {"name": f"{name}_{span}", "years": years, "variables": VARIABLES}
-    try:
-        df = wave_hindcast.get_data_at_point(*lat_lon, **query)
-    except InvalidAttributeError as err:  # this file spells a name differently
-        query["variables"] = file_variable_names(VARIABLES, err.valid)
-        df = wave_hindcast.get_data_at_point(*lat_lon, **query)
+    lat = point_coord(POINT_INFO[name])[0]
+    lon = point_coord(POINT_INFO[name])[1]
+    # The package keys its cache on `name` alone, so a targeted record needs its
+    # own name or it would shadow the full one for the same span (and vice versa).
+    tag = "" if variables == VARIABLES else "_" + "-".join(COLUMN_NAMES[v] for v in variables)
+    # Pinned to S3 rather than left on "auto". Auto switches to the NLR API past 30
+    # variable-years (`backend.AUTO_SEAM_VARIABLE_YEARS`); the API needs a key and
+    # serves a different attribute set per domain -- West_Coast omits
+    # mean_wave_direction, which S3 does serve. Every query here is well under the
+    # seam, and pinning keeps that true rather than merely coincidental.
+    query = {
+        "name": f"{name}_{span}{tag}",
+        "years": years,
+        "variables": variables,
+        "backend": "s3",
+    }
+
+    def download(force=False):
+        try:
+            return wave_hindcast.get_data_at_point(*lat_lon, force=force, **query)
+        except InvalidAttributeError as err:  # this file spells a name differently
+            query["variables"] = file_variable_names(variables, err.valid)
+            return wave_hindcast.get_data_at_point(*lat_lon, force=force, **query)
+    #
+    df = download()
+    # The variable set is not part of the cache key either, so a record cached
+    # before a VARIABLES change comes back with the old columns and the positional
+    # rename below would mislabel them. Re-download when the width disagrees; an
+    # unchanged set still reads straight from cache.
+    columns = [COLUMN_NAMES[v] for v in variables]
+    if df.shape[1] != len(columns):
+        df = download(force=True)
 
     attrs = dict(df.attrs)
     # Columns come back Title Cased in the requested order; use the short names.
-    df.columns = list(COLUMN_NAMES.values())
+    df.columns = columns
     # Drop rows at the fill sentinel (-9 or -999), see the note below.
     df = df[(df > FILL_VALUE + 0.1).all(axis=1)]
-    df["J"] = df["J"] / 1000.0  # W/m -> kW/m
+    if "J" in df:
+        df["J"] = df["J"] / 1000.0  # W/m -> kW/m
     df = df.astype("float64")
     df.attrs = attrs
     return df
@@ -246,15 +539,14 @@ def record_hours(df):
     return len(df) * (df.index[1] - df.index[0]).total_seconds() / 3600
 
 
-data = load_site(SELECTED_SITE)
+data = load_point(SELECTED_POINT)
 ```
 
 ::: {.callout-note}
 ## Missing data is a fill value, not `NaN`
 
-Timesteps the model never produced are written as an in-range sentinel (`-9` or
-`-999`), not `NaN`, so an unmasked read biases every statistic silently.
-`load_site` drops any row at or below the sentinel:
+The model does not always return a valid result at every point over time. For non valid results the
+hindcast datasets use `-9`. This code section removes any rows with -9 from the downloaded dataet.
 
 ```python
 df = df[(df > FILL_VALUE + 0.1).all(axis=1)]
@@ -265,35 +557,10 @@ df = df[(df > FILL_VALUE + 0.1).all(axis=1)]
 
 ## Metadata
 
-Every fetch carries its metadata on `DataFrame.attrs`: the resolved grid node,
-its true position, the units per variable, and the source that served it.
-`describe_point` reports the same node resolution offline, plus the served year
-span and the node's distance from the requested coordinate.
-
+Every download provides metadata, accessible from `DataFrame.attrs`
 ```{python}
-info = wave_hindcast.describe_point(*lat_lon)
-
-metadata = pd.Series(
-    {
-        "site": WAVE_ENERGY_TEST_SITES[SELECTED_SITE]["label"],
-        "domain": data.attrs["domain"],
-        "source": data.attrs["source"],
-        "requested lat, lon": f"{lat_lon[0]:.4f}, {lat_lon[1]:.4f}",
-        "nearest node lat, lon": f"{data.attrs['node_lat']:.4f}, {data.attrs['node_lon']:.4f}",
-        "distance to node [m]": round(info["distance_m"], 1),
-        "node index (gid)": data.attrs["gid"],
-        "years served": f"{info['years'][0]}-{info['years'][1]}",
-        "year loaded": YEAR,
-        "sea states": len(data),
-        "timestep [s]": int((data.index[1] - data.index[0]).total_seconds()),
-        **{f"unit, {label}": unit for label, unit in data.attrs["units"].items()},
-    },
-    name=SELECTED_SITE,
-)
-# Printed, not returned. Quarto's ipynb writer keeps stream output but drops both
-# pandas' HTML table repr (blank cell) and IPython Markdown output (no cell at all),
-# so `print(...)` is the only form that survives into the notebook deliverable.
-print(metadata.to_string())
+metadata = wave_hindcast.describe_point(*lat_lon)
+metadata
 ```
 
 ## Data Preview
@@ -304,10 +571,10 @@ print(data.head().to_string())
 
 # Aggregate Statistics {#sec-aggregate}
 
-Sections 4 through 10 characterize one site, `{python} SITE_LABEL` at
-`{python} SITE_COORDS`, read for `{python} str(YEAR)` from the
-`{python} data.attrs["source"]` backend of the WPTO hindcast. Each single-site
-figure caption repeats the site and coordinates so a figure identifies its source
+Sections 4 through 10 characterize one point, `{python} POINT_LABEL` at
+`{python} POINT_COORDS`, read for `{python} str(YEAR)` from the
+`{python} data.attrs["source"]` backend of the H2O hindcast. Each single-point
+figure caption repeats the point and coordinates so a figure identifies its source
 on its own.
 
 Aggregate wave energy statistics come from mhkit's `performance.statistics`; its
@@ -325,17 +592,36 @@ print(
 )
 ```
 
-# Monthly Climatology {#sec-climatology}
+# Time Series Analysis {#sec-timeseries}
 
-When the resource arrives is a device-performance question: the monthly cycle
-sets what a device produces season by season. The monthly distributions are in
-@fig-monthly-boxplot-hm0 through @fig-monthly-boxplot-j, and the daily structure
-in @fig-daily-climatology-hm0 through @fig-daily-climatology-j.
+The temporal data from the hindcast datasets provide the oppportunity understand how the wave
+resource changes throughout the year. Each subsection below is one view of the same
+single-point record, ordered from the least reduced to the most:
+
+- **Monthly box plots** (@fig-monthly-boxplot-hm0 through @fig-monthly-boxplot-specwidth) --
+  the per-month spread of all eight downloaded variables.
+- **Raw time series** (@fig-timeseries-hm0 through @fig-timeseries-stack) -- the unreduced
+  3-hourly record, which is what every metric and visualization derives from.
+- **Distributions** (@fig-distribution-hm0 through @fig-distribution-specwidth) -- the same
+  record with time set aside entirely, spread over value instead.
+- **Daily climatology** (@fig-daily-climatology-hm0 through @fig-daily-climatology-j) and
+  **rolling averages** (@fig-rolling-7d-j, @fig-rolling-30d-j) -- day-of-year structure, and
+  that structure smoothed until only the seasonal signal is left.
+- **Monthly bars** (@fig-monthly-bar-hm0-mean through @fig-monthly-bar-j-p95) -- one labeled
+  number per month, for the mean and for the 95th percentile.
 
 ```{python}
-import calendar
 
-QOIS = {"Hm0": "$H_{m0}$ [m]", "Te": "$T_e$ [s]", "J": "$J$ [kW/m]"}
+QOIS = {
+    "Hm0": "$H_{m0}$ [m]",
+    "Te": "$T_e$ [s]",
+    "J": "$J$ [kW/m]",
+    "Tp": "$T_p$ [s]",
+    "Dir": "Mean Wave\nDirection [deg]",
+    "MaxEDir": "Maximum Energy\nDirection [deg]",
+    "DirCoeff": "Directionality\nCoefficient [0-1]",
+    "SpecWidth": "Spectral Width\n[0-1]",
+}
 months = np.arange(1, 13)
 month_labels = [calendar.month_abbr[m] for m in months]  # 'Jan'..'Dec'
 colors = sns.color_palette()  # default seaborn color cycle
@@ -350,9 +636,52 @@ def qcolor(q):
     return colors[list(QOIS).index(q)]
 
 
+TS_LINEWIDTH = 1.5
+MONTH_TICKS = [pd.Timestamp(YEAR, m, 1) for m in months]
+
+
+def raw_timeseries(q, name):
+    """The 3-hourly record of `q` as it comes: no aggregation, no smoothing.
+
+    Every figure after this one reduces the record somehow -- per month, per day,
+    per rolling window. This is the series those reductions are computed from, so
+    the reader can see the storm-by-storm structure the aggregates smooth away.
+    Deliberately bare: no band, no overlay, no legend (one line needs no key).
+    """
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3))
+    ax.plot(data.index, data[q], color=qcolor(q), linewidth=TS_LINEWIDTH)
+    ax.set(xlabel="Month", ylabel=QOIS[q])
+    ax.margins(x=0)
+    ax.set_xticks(MONTH_TICKS)
+    ax.set_xticklabels(month_labels)
+    fig.tight_layout()
+    savefig(name)
+
+
+def raw_timeseries_stack(qs, name):
+    """The same raw records stacked on one shared time axis.
+
+    Sharing the axis is the point: a storm shows up as a spike in all three at
+    once, which is impossible to see when the series are separate figures. Only
+    the bottom panel carries the month labels.
+    """
+    fig, axes = plt.subplots(
+        len(qs), 1, figsize=(FIG_WIDTH, 2 * len(qs)), sharex=True
+    )
+    for ax, q in zip(axes, qs):
+        ax.plot(data.index, data[q], color=qcolor(q), linewidth=TS_LINEWIDTH)
+        ax.set_ylabel(QOIS[q])
+        ax.margins(x=0)
+    axes[-1].set_xlabel("Month")
+    axes[-1].set_xticks(MONTH_TICKS)
+    axes[-1].set_xticklabels(month_labels)
+    fig.tight_layout()
+    savefig(name)
+
+
 def monthly_boxplot(q):
     """Box-and-whisker of the 3-hourly distribution of `q` per month."""
-    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3))
     sns.boxplot(x=data.index.month, y=data[q], ax=ax, color=qcolor(q))
     ax.set(xlabel="Month", ylabel=QOIS[q])
     ax.set_xticks(range(12))
@@ -391,43 +720,225 @@ def rolling_median(q, window):
     ax.set_xticklabels(month_labels)
     fig.tight_layout()
     savefig(f"rolling_{window}d_{q.lower()}")
+
+
+HIST_BINS = 50
+
+
+def distribution(q):
+    """Histogram and KDE of the 3-hourly record of `q`, with its CDF on a twin axis.
+
+    The time series above says when each sea state happened; this says how much
+    of the year was spent at each value. Histogram and KDE share the left axis
+    because both are densities: the bars are the binned record, the line is the
+    same record smoothed, and disagreement between them means the bin width is
+    doing the talking. The cumulative curve reads the record as a probability,
+    and is the linear-axis complement of the log-axis survival functions in
+    @sec-exceedance.
+
+    `cut=0` stops the KDE at the observed range, which keeps it off physically
+    impossible values (negative $J$, wave directions past 360 deg).
+    """
+    values = data[q].dropna()
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3.2))
+    ax.hist(values, bins=HIST_BINS, density=True, color=qcolor(q), alpha=0.55,
+            label="Histogram")
+    sns.kdeplot(x=values, ax=ax, color=qcolor(q), linewidth=2, cut=0, label="KDE")
+    ax.set(xlabel=QOIS[q], ylabel="Probability density")
+    ax.margins(x=0)
+
+    cax = ax.twinx()
+    ordered = np.sort(values.values)
+    cdf = np.arange(1, ordered.size + 1) / ordered.size
+    cax.plot(ordered, cdf, color="0.4", linewidth=2, label="Cumulative")
+    cax.set_ylabel("Cumulative probability")
+    cax.set_ylim(0, 1)
+    cax.grid(False)  # seaborn's theme would otherwise draw a second grid
+
+    handles = ax.get_legend_handles_labels()[0] + cax.get_legend_handles_labels()[0]
+    ax.legend(handles, [h.get_label() for h in handles], loc="best")
+    fig.tight_layout()
+    savefig(f"distribution_{q.lower()}")
 ```
+
+## Monthly Box Plots
+
+The box plots cover all eight downloaded variables: the three the rest of this
+section works from ($H_{m0}$, $T_e$, $J$), the peak period $T_p$, both direction
+variables, and the two spectral shape parameters. The direction box plots are raw
+dataset values in the meteorological convention.
 
 ```{python}
 #| label: fig-monthly-boxplot-hm0
-#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of significant wave height ($H_{m0}$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of significant wave height ($H_{m0}$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_boxplot("Hm0")
 ```
 
 ```{python}
 #| label: fig-monthly-boxplot-te
-#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of energy period ($T_e$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of energy period ($T_e$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_boxplot("Te")
 ```
 
 ```{python}
 #| label: fig-monthly-boxplot-j
-#| fig-cap: "PacWave South (44.5670, -124.2290), monthly distribution of omnidirectional wave energy flux ($J$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_boxplot("J")
 ```
 
 ```{python}
+#| label: fig-monthly-boxplot-tp
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of peak period ($T_p$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+monthly_boxplot("Tp")
+```
+
+```{python}
+#| label: fig-monthly-boxplot-dir
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of mean wave direction. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+monthly_boxplot("Dir")
+```
+
+```{python}
+#| label: fig-monthly-boxplot-maxedir
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of maximum energy direction. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+monthly_boxplot("MaxEDir")
+```
+
+```{python}
+#| label: fig-monthly-boxplot-dircoeff
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of directionality coefficient. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+monthly_boxplot("DirCoeff")
+```
+
+```{python}
+#| label: fig-monthly-boxplot-specwidth
+#| fig-cap: "PacWave South (44.5670, -124.2290), monthly (2020) distribution of spectral width. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+monthly_boxplot("SpecWidth")
+```
+
+## Raw Time Series
+
+@fig-timeseries-hm0 through @fig-timeseries-j show the 3-hourly record as it comes, with no
+aggregation and no smoothing. @fig-timeseries-stack puts the three on one shared time axis,
+where a storm reads as a simultaneous excursion in all three rather than three separate
+spikes.
+
+```{python}
+#| label: fig-timeseries-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), 3-hourly (2020) record of significant wave height ($H_{m0}$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+raw_timeseries("Hm0", "timeseries_hm0")
+```
+
+```{python}
+#| label: fig-timeseries-te
+#| fig-cap: "PacWave South (44.5670, -124.2290), 3-hourly (2020) record of energy period ($T_e$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+raw_timeseries("Te", "timeseries_te")
+```
+
+```{python}
+#| label: fig-timeseries-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), 3-hourly (2020) record of omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+raw_timeseries("J", "timeseries_j")
+```
+
+```{python}
+#| label: fig-timeseries-stack
+#| fig-cap: "PacWave South (44.5670, -124.2290), 3-hourly (2020) records of significant wave height ($H_{m0}$), energy period ($T_e$), and omnidirectional wave energy flux ($J$) on a shared time axis. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+raw_timeseries_stack(["Hm0", "Te", "J"], "timeseries_stack")
+```
+
+## Distributions
+
+Every figure above is indexed by time. These are not: each histogram bins the
+same 3-hourly record into 50 bins over the value of the quantity, so what it
+shows is how much of the year was spent at each sea state, not when. Bars and
+KDE line are both densities on the left axis -- the binned record and its
+smoothed version -- so where they disagree, the bin width is doing the talking.
+The grey cumulative curve on the twin axis reads that record as a probability,
+$P(q \le x)$, on a linear axis. Its upper tail is the same information
+@sec-exceedance re-plots as the survival function $P(q > x)$ on a log axis for
+$H_{m0}$ and $J$, where the rare-but-large sea states that matter for survival
+loads are legible.
+
+Like the box plots, this covers all eight downloaded variables
+(@fig-distribution-hm0 through @fig-distribution-specwidth). The two direction
+variables are the ones to read carefully: direction is circular, so a KDE fitted
+on a linear 0-360 degree axis cannot wrap, and a distribution straddling north
+would show as two edge peaks rather than one. @sec-directionality plots those on
+a polar axis instead.
+
+```{python}
+#| label: fig-distribution-hm0
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) significant wave height ($H_{m0}$) record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("Hm0")
+```
+
+```{python}
+#| label: fig-distribution-te
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) energy period ($T_e$) record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("Te")
+```
+
+```{python}
+#| label: fig-distribution-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) omnidirectional wave energy flux ($J$) record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("J")
+```
+
+```{python}
+#| label: fig-distribution-tp
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) peak period ($T_p$) record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("Tp")
+```
+
+```{python}
+#| label: fig-distribution-dir
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) mean wave direction record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("Dir")
+```
+
+```{python}
+#| label: fig-distribution-maxedir
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) maximum energy direction record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("MaxEDir")
+```
+
+```{python}
+#| label: fig-distribution-dircoeff
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) directionality coefficient record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("DirCoeff")
+```
+
+```{python}
+#| label: fig-distribution-specwidth
+#| fig-cap: "PacWave South (44.5670, -124.2290), distribution (50 bins) of the 3-hourly (2020) spectral width record, with its kernel density estimate and cumulative distribution. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+distribution("SpecWidth")
+```
+
+## Daily Climatology
+
+Grouping by day of year collapses the eight values in each day to a median and a 25-75%
+band, so the day-to-day structure survives but the within-day scatter does not.
+
+```{python}
 #| label: fig-daily-climatology-hm0
-#| fig-cap: "PacWave South (44.5670, -124.2290), daily significant wave height ($H_{m0}$): median, 25-75% band, and 7-day average"
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily (2020) significant wave height ($H_{m0}$): median, 25-75% band, and 7-day average. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 daily_climatology("Hm0")
 ```
 
 ```{python}
 #| label: fig-daily-climatology-te
-#| fig-cap: "PacWave South (44.5670, -124.2290), daily energy period ($T_e$): median, 25-75% band, and 7-day average"
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily (2020) energy period ($T_e$): median, 25-75% band, and 7-day average. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 daily_climatology("Te")
 ```
 
 ```{python}
 #| label: fig-daily-climatology-j
-#| fig-cap: "PacWave South (44.5670, -124.2290), daily omnidirectional wave energy flux ($J$): median, 25-75% band, and 7-day average"
+#| fig-cap: "PacWave South (44.5670, -124.2290), daily (2020) omnidirectional wave energy flux ($J$): median, 25-75% band, and 7-day average. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 daily_climatology("J")
 ```
+
+## Rolling Averages
 
 A 7-day average still tracks individual storm systems; a 30-day average smooths
 past them and leaves the seasonal signal on its own
@@ -435,17 +946,17 @@ past them and leaves the seasonal signal on its own
 
 ```{python}
 #| label: fig-rolling-7d-j
-#| fig-cap: "PacWave South (44.5670, -124.2290), 7-day moving average of the daily median omnidirectional wave energy flux ($J$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), 7-day moving average (2020) of the daily median omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 rolling_median("J", 7)
 ```
 
 ```{python}
 #| label: fig-rolling-30d-j
-#| fig-cap: "PacWave South (44.5670, -124.2290), 30-day moving average of the daily median omnidirectional wave energy flux ($J$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), 30-day moving average (2020) of the daily median omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 rolling_median("J", 30)
 ```
 
-## Monthly bars
+## Monthly Bars
 
 One labeled bar per month (@fig-monthly-bar-hm0-mean through
 @fig-monthly-bar-j-p95). Mean and 95th percentile are separate figures: the mean is roughly what a device harvests in an average month, the 95th
@@ -472,25 +983,25 @@ p95 = lambda s: s.quantile(0.95)
 
 ```{python}
 #| label: fig-monthly-bar-hm0-mean
-#| fig-cap: "PacWave South (44.5670, -124.2290), mean significant wave height ($H_{m0}$) per month"
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean significant wave height ($H_{m0}$) per month (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_bar("Hm0", "Mean", "mean", "%.2f", "monthly_bar_hm0_mean")
 ```
 
 ```{python}
 #| label: fig-monthly-bar-hm0-p95
-#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile significant wave height ($H_{m0}$) per month"
+#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile significant wave height ($H_{m0}$) per month (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_bar("Hm0", "95th percentile", p95, "%.2f", "monthly_bar_hm0_p95")
 ```
 
 ```{python}
 #| label: fig-monthly-bar-j-mean
-#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) per month"
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) per month (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_bar("J", "Mean", "mean", "%.1f", "monthly_bar_j_mean")
 ```
 
 ```{python}
 #| label: fig-monthly-bar-j-p95
-#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile omnidirectional wave energy flux ($J$) per month"
+#| fig-cap: "PacWave South (44.5670, -124.2290), 95th percentile omnidirectional wave energy flux ($J$) per month (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 monthly_bar("J", "95th percentile", p95, "%.1f", "monthly_bar_j_p95")
 ```
 
@@ -499,29 +1010,49 @@ monthly_bar("J", "95th percentile", p95, "%.1f", "monthly_bar_j_p95")
 Joint probability of occurrence (percent of the year) over the ($H_{m0}$, $T_e$)
 sea-state bins (@fig-jpd-frequency). This matrix is the resource half of device
 performance: paired with a device power matrix it becomes AEP in @sec-aep.
+@fig-jpd-frequency-plain is the same matrix without the per-cell numbers, for
+reading the distribution's shape rather than looking values up in it.
 
 ```{python}
+# Bin EDGES. `np.histogram2d` (the polar JPDs in @sec-directionality) takes edges.
 Hm0_bins = np.arange(0, np.ceil(data.Hm0.max()) + 0.5, 0.5)
 Te_bins = np.arange(0, np.ceil(data.Te.max()) + 1, 1)
 
+# mhkit's matrix builders take bin CENTERS, not edges -- `wave_energy_flux_matrix`
+# converts what it is handed from centers to edges internally. Passing the edge
+# array straight in would silently offset every bin by half a width, putting the
+# Hm0 boundaries at 0.25/0.75/... instead of the IEC 0/0.5/... So hand it the
+# midpoints, which puts the bins where the edge arrays above say they are.
+Hm0_centers = (Hm0_bins[:-1] + Hm0_bins[1:]) / 2
+Te_centers = (Te_bins[:-1] + Te_bins[1:]) / 2
+
 # Joint probability of occurrence (reused as the AEP frequency matrix in @sec-aep).
 frequency = performance.wave_energy_flux_matrix(
-    data.Hm0, data.Te, data.J, "frequency", Hm0_bins, Te_bins
+    data.Hm0, data.Te, data.J, "frequency", Hm0_centers, Te_centers
 )
 print(frequency.to_string())
 ```
 
 ```{python}
 #| label: fig-jpd-frequency
-#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of ($H_{m0}$, $T_e$) sea states, percent of the year"
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of ($H_{m0}$, $T_e$) sea states, percent of the year (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 plot_wave_matrix(frequency * 100, zlabel="Joint Probability [% of year]")
 savefig("jpd_frequency_matrix")
+```
+
+```{python}
+#| label: fig-jpd-frequency-plain
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of ($H_{m0}$, $T_e$) sea states, percent of the year (2020), unannotated. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+plot_wave_matrix(
+    frequency * 100, zlabel="Joint Probability [% of year]", annotate=False
+)
+savefig("jpd_frequency_matrix_plain")
 ```
 
 # Extreme Sea States {#sec-extremes}
 
 Fifty- and one-hundred-year environmental contours bound the extreme sea states a
-device must survive (@fig-extreme-contours). This document uses the `PCA` method
+device must survive (@fig-extreme-contours). This example uses the `PCA` method
 throughout, following the Wave Energy Converter Design Response Toolbox
 [@coe2016_wdrt]: it applies principal component analysis to $(H_{m0}, T_e)$, fits
 an inverse Gaussian in the rotated frame, and reads the contour off a circle of
@@ -529,15 +1060,15 @@ iso-probability using the inverse first-order reliability method (I-FORM)
 [@eckert2016_pca_iform].
 
 Two caveats. `environmental_contours` offers ten methods, and the choice moves the
-100-year $H_{m0}$ by meters, more than the site or the record length does. The
+100-year $H_{m0}$ by meters, more than the point or the record length does. The
 values below are PCA's answer, not the only answer (the full ten-method comparison
-lives in the experiment version of this document). A single hindcast year is
+lives in the experiment version of this example). A single hindcast year is
 illustrative, not a formal extreme-value estimate. @sec-contour-records quantifies
 how much the record length moves the result.
 
 ```{python}
 #| label: fig-extreme-contours
-#| fig-cap: "PacWave South (44.5670, -124.2290), 50- and 100-year environmental contours ($H_{m0}$ vs $T_e$, PCA)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), 50- and 100-year environmental contours ($H_{m0}$ vs $T_e$, PCA) from a 1-year record (2020). Method: principal component analysis of ($H_{m0}$, $T_e$), an inverse Gaussian fit in the rotated frame, and the contour read off a circle of iso-probability by the inverse first-order reliability method (I-FORM); computed with `mhkit.wave.contours.environmental_contours(Hm0, Te, dt, return_period, method='PCA')`. Method Source: Eckert-Gallup, Aubrey C., Cédric J. Sallaberry, Ann R. Dallman, and Vincent S. Neary. 2016. “Application of Principal Component Analysis (PCA) and Improved Joint Probability Distributions to the Inverse First-Order Reliability Method (I-FORM) for Predicting Extreme Sea States.” Ocean Engineering 112: 307–19. <https://doi.org/10.1016/j.oceaneng.2015.12.018>. Coe, Ryan, Carlos Michelen, Aubrey Eckert-Gallup, Yi-Hsiang Yu, and Jennifer Van Rij. 2016. WEC Design Response Toolbox v. 1.0. Computer software. <https://www.osti.gov//servlets/purl/1312743>. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 # Seconds between sea-state samples (3-hour hindcast -> 10800 s).
 dt = (data.index[1] - data.index[0]).total_seconds()
 
@@ -553,7 +1084,7 @@ graphics.plot_environmental_contour(
     data.Hm0.values,
     Te_contours,
     Hm0_contours,
-    data_label=WAVE_ENERGY_TEST_SITES[SELECTED_SITE]["label"],
+    data_label=POINT_INFO[SELECTED_POINT]["label"],
     contour_label=["50-year contour", "100-year contour"],
     x_label="Energy Period, $T_e$ [s]",
     y_label="Significant Wave Height, $H_{m0}$ [m]",
@@ -573,49 +1104,67 @@ for label, cop in (("50-year", copulas50), ("100-year", copulas100)):
 
 # Exceedance Probability {#sec-exceedance}
 
-Exceedance probability is how often the site exceeds a given sea state, the
+Exceedance probability is how often the point exceeds a given sea state, the
 survivability view of the same record. @fig-exceedance-hm0 is the empirical
-survival function $P(H_{m0} > x)$.
+survival function $P(H_{m0} > x)$, and @fig-exceedance-j the same construction for
+the energy flux, $P(J > x)$. The two answer different questions: the $H_{m0}$ tail
+is what the structure must survive, the $J$ tail is where the resource actually
+sits, and $J$'s is the longer one because flux goes as $H_{m0}^2 T_e$.
+
+```{python}
+def exceedance_plot(q, name, fmt="{:.1f}"):
+    """Empirical survival function of `q`: P(q > x) against x, log y.
+
+    The dashed markers are the 99th percentile and the record maximum. Axis text
+    is derived from QOIS[q], so the symbol and unit follow the variable.
+    """
+    values = np.sort(data[q].values)
+    exceedance = 1.0 - np.arange(1, values.size + 1) / (values.size + 1)
+    symbol = QOIS[q].split("[")[0].strip().strip("$")  # "$H_{m0}$ [m]" -> "H_{m0}"
+    unit = QOIS[q].split("[")[-1].rstrip("]").strip()  # -> "m"
+
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.semilogy(values, exceedance, color=qcolor(q))
+    for pct in (0.99, 1.0):
+        val = np.quantile(data[q], pct) if pct < 1.0 else data[q].max()
+        ax.axvline(val, ls="--", color="0.5")
+        ax.text(
+            val, 1e-3,
+            f"{'max' if pct == 1.0 else '99%'}\n{fmt.format(val)} {unit}",
+            ha="center",
+        )
+    ax.set(xlabel=QOIS[q], ylabel=f"$P({symbol} > x)$")
+    ax.grid(True, which="both", alpha=0.3)
+    savefig(name)
+```
 
 ```{python}
 #| label: fig-exceedance-hm0
-#| fig-cap: "PacWave South (44.5670, -124.2290), exceedance probability of significant wave height ($H_{m0}$)"
-hm0_sorted = np.sort(data.Hm0.values)
-exceedance = 1.0 - np.arange(1, hm0_sorted.size + 1) / (hm0_sorted.size + 1)
+#| fig-cap: "PacWave South (44.5670, -124.2290), exceedance probability (2020) of significant wave height ($H_{m0}$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+exceedance_plot("Hm0", "exceedance_hm0")
+```
 
-fig, ax = plt.subplots(figsize=(7, 5))
-ax.semilogy(hm0_sorted, exceedance)
-for pct in (0.99, 1.0):
-    val = np.quantile(data.Hm0, pct) if pct < 1.0 else data.Hm0.max()
-    ax.axvline(val, ls="--", color="0.5")
-    ax.text(val, 1e-3, f"{'max' if pct == 1.0 else '99%'}\n{val:.1f} m", ha="center")
-ax.set(xlabel="$H_{m0}$ [m]", ylabel="$P(H_{m0} > x)$")
-ax.grid(True, which="both", alpha=0.3)
-savefig("exceedance_hm0")
+```{python}
+#| label: fig-exceedance-j
+#| fig-cap: "PacWave South (44.5670, -124.2290), exceedance probability (2020) of omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+exceedance_plot("J", "exceedance_j", fmt="{:.0f}")
 ```
 
 # Directionality {#sec-directionality}
 
-Where the waves come from decides device orientation and array layout. The wave
-rose (@fig-wave-rose) shows how often each direction sector occurs, stacked by
+A  wave rose (@fig-wave-rose) shows how often each direction sector occurs, stacked by
 $H_{m0}$; the polar joint probability panels
 (@fig-polar-jpd-hm0, @fig-polar-jpd-te, @fig-polar-jpd-j) resolve the same
-directions against each variable; and @fig-directionality-mean-power shows where
-the mean power arrives from.
+directions against each variable; and @fig-directionality-mean-power visualizes the predominant direction
+of mean power [kW/m].
 
 ::: {.callout-note}
+
 ## Direction conventions
 
 Directions come back in the meteorological convention (degrees clockwise from
-north, the direction waves arrive *from*) for every domain. The published S3
-files already use it, and the package applies the one correction that exists
-(Hawaii's API CSVs) automatically, with `describe_point()["direction_transform"]`
-recording whether it did. An earlier version of this example inherited a $-90°$
-rotation written against a different product (the 1-hour virtual buoy); it is not
-applied here, and the raw 3-hour directions at PacWave South are consistent with
-the WNW prevailing direction in the site's published specification. Anyone
-depending on absolute direction should confirm the convention against a
-co-located measured buoy.
+true north, the direction waves arrive *from*) for every domain.
+
 :::
 
 ```{python}
@@ -624,7 +1173,7 @@ Dir_bins = np.arange(0, 360 + 15, 15)
 
 ```{python}
 #| label: fig-wave-rose
-#| fig-cap: "PacWave South (44.5670, -124.2290), wave rose: percent of the year by direction, stacked by significant wave height ($H_{m0}$) band"
+#| fig-cap: "PacWave South (44.5670, -124.2290), wave rose: percent of the year (2020) by direction, stacked by significant wave height ($H_{m0}$) band. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 rose_bands = [0, 1, 2, 3, 4, np.inf]  # Hm0 [m]
 band_labels = ["0-1 m", "1-2 m", "2-3 m", "3-4 m", ">4 m"]
 
@@ -657,14 +1206,43 @@ savefig("directionality_wave_rose")
 
 ```{python}
 def polar_jpd(radius, r_bins, r_label, name):
-    """Polar joint probability of direction against `radius`, % of year."""
+    """Polar joint probability of direction against `radius`, % of year.
+
+    Zero-probability cells are blanked rather than drawn at the bottom of the
+    colour scale: a sea state that never occurred is not the same as one that
+    occurred rarely, and filling them paints the whole disc the lowest colour so
+    the populated sector reads against solid purple instead of the background.
+
+    The rings carry `r_label`'s unit. The radius is a different quantity in each
+    of these figures, so a bare number on the rings does not say what it measures.
+    """
     counts, _, _ = np.histogram2d(data.Dir, radius, bins=[Dir_bins, r_bins])
     counts = counts / counts.sum() * 100  # % of year per (direction, radius) bin
+    counts = np.where(counts == 0, np.nan, counts)  # NaN draws transparent
     th, rr = np.meshgrid(np.deg2rad(Dir_bins), r_bins, indexing="ij")
     fig, ax = plt.subplots(figsize=(7, 6), subplot_kw={"projection": "polar"})
     pcm = ax.pcolormesh(th, rr, counts, shading="auto", cmap="viridis")
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
+    # Name the angular axis on the 0 deg label, the same gap the rings had: the
+    # compass numbers alone never say the angle is a wave direction. Derived from
+    # QOIS["Dir"] ("Mean Wave\nDirection [deg]") so the name has one source.
+    dir_name = QOIS["Dir"].replace("\n", " ").split("[")[0].strip()
+    theta_ticks = np.arange(0, 360, 45)
+    theta_labels = [f"{t:g}°" for t in theta_ticks]
+    theta_labels[0] = f"0°, {dir_name}"
+    ax.set_thetagrids(theta_ticks, theta_labels)
+    # Ring labels moved off the data (the record sits west) and given the unit
+    # carried in r_label, e.g. "$H_{m0}$ [m]" -> "2 m". 67.5 deg sits between two
+    # compass labels, so the outermost ring label does not collide with one; the
+    # full set of rings is thinned to four, because ring labels are collinear and
+    # eight of them run together into an unreadable line.
+    ax.set_rlabel_position(67.5)
+    unit = r_label.split("[")[-1].rstrip("]").strip() if "[" in r_label else ""
+    ticks = [t for t in ax.get_yticks() if 0 < t <= ax.get_rmax()]
+    ticks = ticks[:: max(1, len(ticks) // 4)]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t:g} {unit}".strip() for t in ticks], fontsize=9)
     plt.colorbar(pcm, ax=ax, label="% of year", pad=0.1)
     fig.tight_layout()
     savefig(name)
@@ -672,25 +1250,25 @@ def polar_jpd(radius, r_bins, r_label, name):
 
 ```{python}
 #| label: fig-polar-jpd-hm0
-#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and significant wave height ($H_{m0}$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability (2020) of direction and significant wave height ($H_{m0}$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 polar_jpd(data.Hm0, Hm0_bins, QOIS["Hm0"], "polar_jpd_hm0")
 ```
 
 ```{python}
 #| label: fig-polar-jpd-te
-#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and energy period ($T_e$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability (2020) of direction and energy period ($T_e$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 polar_jpd(data.Te, Te_bins, QOIS["Te"], "polar_jpd_te")
 ```
 
 ```{python}
 #| label: fig-polar-jpd-j
-#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability of direction and omnidirectional wave energy flux ($J$)"
+#| fig-cap: "PacWave South (44.5670, -124.2290), joint probability (2020) of direction and omnidirectional wave energy flux ($J$). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 polar_jpd(data.J, np.linspace(0, data.J.max(), len(Hm0_bins)), QOIS["J"], "polar_jpd_j")
 ```
 
 ```{python}
 #| label: fig-directionality-mean-power
-#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) by direction sector"
+#| fig-cap: "PacWave South (44.5670, -124.2290), mean omnidirectional wave energy flux ($J$) by direction sector (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 mean_sector = pd.cut(data.Dir, Dir_bins)
 mean_J = data.J.groupby(mean_sector, observed=False).mean()
 centers = np.deg2rad(Dir_bins[:-1] + 7.5)
@@ -702,163 +1280,324 @@ ax.set_theta_direction(-1)
 savefig("directionality_mean_power")
 ```
 
-# Annual Energy Production (AEP) {#sec-aep}
+# Mean Annual Energy Production (MAEP) {#sec-aep}
 
-AEP is the electrical energy a device would deliver at this site over a year.
-Computing it needs two matrices on the same sea-state bins: the resource side,
-which @sec-jpd's joint probability matrix already provides, and the device side,
-a power matrix, which is a property of a specific WEC and is not carried in
-this document.
+Mean annual energy production (MAEP) is an estimate of electrical energy a device would generates at this point
+over an average year. It needs two matrices on the same sea-state bins: the resource side, which
+@sec-jpd's joint probability matrix already provides, and the device side, a power matrix from a modeled or measured Wave Energy Converter (WEC). In this example we are using `Wave Energy Converters.csv`, from the [System
+Advisor Model (SAM)](https://sam.nlr.gov/)
+ that provides power matrices from the wave energy [reference
+ models](https://openei.org/wiki/PRIMRE/Signature_Projects/Reference_Model). Devices included here
+ are RM3, a Wave Point Absorber, RM5 an Oscillating Surge Flap and RM6 and Oscillating Water Column.
 
-To run this section, supply a power matrix in exactly this format:
+## Reading SAM Wave Reference Model Power Matricies
 
-- a pandas DataFrame with the same index and columns as the `frequency` matrix
-  from @sec-jpd: rows are the $H_{m0}$ bin centers of `Hm0_bins` (0.5 m steps),
-  columns are the $T_e$ bin centers of `Te_bins` (1 s steps)
-- each value is the mean electrical power in kW the device delivers in that
-  ($H_{m0}$, $T_e$) sea state
-- bins the device cannot operate in are 0 (cut-out above, below cut-in), not NaN
+The library encodes each power matrix as a run of bracketed, semicolon-separated
+groups in one CSV cell. The first group is the $T_e$ axis -- a `0.0` placeholder
+for the corner, then one bin center per column. Every later group is one row: its
+$H_{m0}$ bin center, then one mean power value in kW per $T_e$ column.
 
-AEP is the element-wise product of the two matrices, summed, times the hours in
-the record: each bin contributes (fraction of the year) x (power in that bin).
-When working from measured device data instead, mhkit's
-`performance.mean_annual_energy_production_matrix(CWM, JM, frequency)` computes
-the same quantity from a capture width matrix.
+Both axes are bin centers, on 0.5 m and 1 s steps. Power matricies typically  span a wider range of sea states (up to $H_{m0}$ 9.75 m,
+$T_e$ 20.5 s) and power matrix bins are not used where the matrices are not "aligned".
 
 ```{python}
-# POWER_MATRIX: device power [kW] on the same bins as `frequency` (see the format
-# above). For example: pd.read_csv("device_power_matrix.csv", index_col=0) with
-# the bin centers as index/column labels.
-POWER_MATRIX = None
+def find_asset(filename):
+    """The file next to the notebook, or wherever Kaggle mounted it."""
+    local = Path(filename)
+    if local.exists():
+        return local
+    root = Path("/kaggle/input")
+    hit = next(root.rglob(filename), None) if root.exists() else None
+    if hit is None:
+        raise FileNotFoundError(f"{filename}: not found locally or under {root}")
+    return hit
 
-hours_in_record = record_hours(data)
 
-if POWER_MATRIX is not None:
-    aep_kwh = float((frequency * POWER_MATRIX).to_numpy().sum()) * hours_in_record
-    print(f"AEP: {aep_kwh / 1e3:,.0f} MWh over {hours_in_record:.0f} h")
-else:
-    print("No power matrix supplied -- section stubbed. See the format above.")
+def parse_wec_power_matrix(cell):
+    """One library cell -> a power matrix [kW] indexed by (Hm0, Te) bin centers."""
+    groups = re.findall(r"\[([^\]]*)\]", cell)
+    te_centers = [float(v) for v in groups[0].split(";")][1:]  # drop the corner
+    hm0_centers, rows = [], []
+    for group in groups[1:]:
+        values = [float(v) for v in group.split(";")]
+        hm0_centers.append(values[0])
+        rows.append(values[1:])
+    return pd.DataFrame(rows, index=hm0_centers, columns=te_centers)
+
+
+# Rows 1 and 2 of the file are a units row and a variable-name row, not data.
+wec_table = pd.read_csv(find_asset("Wave Energy Converters.csv"), skiprows=[1, 2])
+POWER_MATRICES = {
+    row["Name"]: parse_wec_power_matrix(row["Power"])
+    for _, row in wec_table.iterrows()
+}
+
+for _name, _matrix in POWER_MATRICES.items():
+    print(
+        f"{_name}: {_matrix.shape[0]} Hm0 bins x {_matrix.shape[1]} Te bins, "
+        f"rated {_matrix.to_numpy().max():.1f} kW"
+    )
 ```
 
-# Multiple Sites: Comparison {#sec-multisite}
+## Reference Model Mean Power Matricies
 
-The single-site pipeline above characterizes one location; here we place several
-sites side by side. Edit `SITES_TO_COMPARE`, a list of
-`WAVE_ENERGY_TEST_SITES` keys, to add or omit sites. Every fetch lands in the
-package cache, so re-runs skip S3 entirely. Every site keeps one color across
-every figure below.
-
-The Alaska and Puerto Rico points are open water with no test facility, included
-to exercise those domains. The Atlantic domain is omitted for now: multi-year S3
-reads of its files (the largest in the dataset) currently stall mid-download.
-When re-enabled, Pioneer WEC is the site to prefer over Jennette's Pier. The
-pier's narrow, depth-limited $H_{m0}$ range breaks `environmental_contours`
-under MHKiT's default binning (`LinAlgError`), a statement about the bin
-defaults rather than the ocean, and `bin_val_size=0.10` fixes it.
+Each matrix is the device's mean electrical power per sea state
+(@fig-power-matrix-rm3 through @fig-power-matrix-rm6). Bins the device cannot
+operate in are zero and are left blank, so the shape of each plot is the device's
+operating envelope: where it produces, and where it saturates at rated power.
 
 ```{python}
-SITES_TO_COMPARE = [
-    "US_Oregon_PacWave_South",                 # West_Coast
-    "US_Oregon_PacWave_North",                 # West_Coast
-    "US_California_Humboldt_Bay",              # West_Coast
-    "US_California_San_Luis_Obispo",           # West_Coast
-    "US_Hawaii_Oahu_WETS",                     # Hawaii
-    "US_Alaska_Kodiak",                        # Alaska
-    "US_PuertoRico_North_Shore",               # Gulf_of_Mexico_and_Puerto_Rico
-    # "US_Massachusetts_WoodsHole_PioneerWec", # Atlantic; multi-year S3 reads
-    #                                          # currently stall -- see above
-    # "US_North_Carolina_Jenettes_Pier",       # Atlantic; needs bin_val_size=0.10
-    #                                          # to contour -- see the note above
-]  # comment a key in/out to include/omit that site
+#| label: fig-power-matrix-rm3
+#| fig-cap: "RM3 (heaving buoy, hydraulic drivetrain), modelled device power over ($H_{m0}$, $T_e$) sea states. Data Source: modelled reference-device power matrices, Wave Energy Converters.csv."
+plot_wave_matrix(
+    POWER_MATRICES["RM3"], zlabel="Device Power [kW]", annotate=False
+)
+savefig("power_matrix_rm3")
+```
 
-site_data = {}
-for name in SITES_TO_COMPARE:
+```{python}
+#| label: fig-power-matrix-rm5
+#| fig-cap: "RM5 (oscillating surge wave converter, hydraulic drivetrain), modelled device power over ($H_{m0}$, $T_e$) sea states. Data Source: modelled reference-device power matrices, Wave Energy Converters.csv."
+plot_wave_matrix(
+    POWER_MATRICES["RM5"], zlabel="Device Power [kW]", annotate=False
+)
+savefig("power_matrix_rm5")
+```
+
+```{python}
+#| label: fig-power-matrix-rm6
+#| fig-cap: "RM6 (backward bent duct buoy floating oscillating water column, Wells air turbine), modelled device power over ($H_{m0}$, $T_e$) sea states. Data Source: modelled reference-device power matrices, Wave Energy Converters.csv."
+plot_wave_matrix(
+    POWER_MATRICES["RM6"], zlabel="Device Power [kW]", annotate=False
+)
+savefig("power_matrix_rm6")
+```
+
+## Mean Annual Energy Production (MAEP)
+
+Each bin contributes (fraction of the year) x (power in that bin); summed and
+scaled to a year, that is MAEP. mhkit factors device performance as capture width
+x wave energy flux, so
+`performance.mean_annual_energy_production_matrix(CWM, JM, frequency)` multiplies
+three matrices and scales by 8766 h, the average length of a year. The library
+publishes the *product* of capture width and flux directly as a power matrix, so
+the flux term is unity here and the power matrix carries the whole kW value.
+
+Note 8766 h is an average year, not this record: 2020 is a leap year and the
+record covers 8784 h. MAEP is deliberately the average-year figure, so the two
+differ by 0.2%.
+
+### JPD Multiplied by Power Matrix
+
+@fig-maep-contribution-rm3 through @fig-maep-contribution-rm6 show the
+intermediate: device power multiplied by the probability of the bin it sits in.
+This is the matrix mhkit sums internally, and its cells are deliberately odd
+quantities. Where RM3 makes 48.3 kW in a sea state that occupies 6.8% of the
+year, the cell reads 3.28 kW -- not a power the device ever produces, but that
+bin's share of the annual average. Summed, the cells give the device's mean
+power; times 8766 h that is MAEP.
+
+The greyed cells are where the two matrices do not overlap: either the point
+never produced that sea state, or the device makes nothing in it. A device only
+earns from bins that are populated *and* inside its operating envelope, and the
+grey is everything that falls outside that intersection.
+
+```{python}
+def maep_contribution(power, frequency):
+    """Per-bin contribution to mean power [kW]: device power x bin probability."""
+    aligned = power.reindex(
+        index=frequency.index, columns=frequency.columns
+    ).fillna(0.0)
+    return aligned * frequency
+```
+
+```{python}
+#| label: fig-maep-contribution-rm3
+#| fig-cap: "RM3, per-bin contribution to mean power: modelled device power multiplied by the 2020 joint probability of each ($H_{m0}$, $T_e$) sea state at PacWave South (44.5670, -124.2290). Cells sum to the device mean power; times 8766 h that is MAEP. Grey cells are sea states the point never produced or the device cannot use. Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+plot_wave_matrix(
+    maep_contribution(POWER_MATRICES["RM3"], frequency),
+    zlabel="Contribution to Mean Power [kW]",
+    fmt=".2f", suffix="", blank_color="0.85",
+)
+savefig("maep_contribution_rm3")
+```
+
+```{python}
+#| label: fig-maep-contribution-rm5
+#| fig-cap: "RM5, per-bin contribution to mean power: modelled device power multiplied by the 2020 joint probability of each ($H_{m0}$, $T_e$) sea state at PacWave South (44.5670, -124.2290). Cells sum to the device mean power; times 8766 h that is MAEP. Grey cells are sea states the point never produced or the device cannot use. Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+plot_wave_matrix(
+    maep_contribution(POWER_MATRICES["RM5"], frequency),
+    zlabel="Contribution to Mean Power [kW]",
+    fmt=".2f", suffix="", blank_color="0.85",
+)
+savefig("maep_contribution_rm5")
+```
+
+```{python}
+#| label: fig-maep-contribution-rm6
+#| fig-cap: "RM6, per-bin contribution to mean power: modelled device power multiplied by the 2020 joint probability of each ($H_{m0}$, $T_e$) sea state at PacWave South (44.5670, -124.2290). Cells sum to the device mean power; times 8766 h that is MAEP. Grey cells are sea states the point never produced or the device cannot use. Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+plot_wave_matrix(
+    maep_contribution(POWER_MATRICES["RM6"], frequency),
+    zlabel="Contribution to Mean Power [kW]",
+    fmt=".2f", suffix="", blank_color="0.85",
+)
+savefig("maep_contribution_rm6")
+```
+
+```{python}
+#| label: tbl-device-maep
+#| tbl-cap: "Mean annual energy production per modelled reference device at PacWave South, from the 2020 joint probability matrix. Device Source: modelled reference-device power matrices, Wave Energy Converters.csv. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+def device_maep(power, frequency):
+    """MAEP [kWh] for one device against one point's joint probability matrix.
+
+    mhkit needs all three matrices on identical bins, so the device matrix is
+    reindexed onto `frequency`'s. Both use the same bin-center convention, so
+    this is a pure subset -- nothing is interpolated. `fillna(0)` is a guard for
+    a device grid that does not reach a sea state the point produces; treating
+    that as "produces nothing there" is the conservative reading.
+    """
+    aligned = power.reindex(
+        index=frequency.index, columns=frequency.columns
+    ).fillna(0.0)
+    unit_flux = pd.DataFrame(
+        1.0, index=frequency.index, columns=frequency.columns
+    )
+    return performance.mean_annual_energy_production_matrix(
+        aligned, unit_flux, frequency
+    )
+
+
+_specs = wec_table.set_index("Name")
+device_energy = pd.DataFrame(
+    [
+        {
+            "Device": name,
+            "Technology": _specs.loc[name, "Technology Type"],
+            "Rated [kW]": matrix.to_numpy().max(),
+            "MAEP [MWh/yr]": device_maep(matrix, frequency) / 1e3,
+        }
+        for name, matrix in POWER_MATRICES.items()
+    ]
+)
+# Capacity factor against the matrix maximum, which is the rated power here.
+device_energy["Capacity factor"] = device_energy["MAEP [MWh/yr]"] * 1e3 / (
+    device_energy["Rated [kW]"] * 8766
+)
+show_table(device_energy.round({"Rated [kW]": 1, "MAEP [MWh/yr]": 1,
+                                "Capacity factor": 3}))
+```
+
+# Multiple Points: Comparison {#sec-multipoint}
+
+The single-point pipeline above characterizes one point; here we place several
+points side by side. `POINTS_TO_COMPARE` is set in the configuration section
+above. Every download is saved
+in the package cache, so re-runs skip S3 entirely. Every point keeps one color
+across every figure below.
+
+@fig-compared-points visualizes the points being compared.
+
+```{python}
+#| label: fig-compared-points
+#| fig-cap: "The points compared side by side below"
+_ = render_points_map_outputs(
+    {name: POINT_INFO[name] for name in POINTS_TO_COMPARE if name in POINT_INFO},
+    make_points_map,
+    output_dir=FIG_DIR,
+    stem="compared_points_map",
+    title="Compared points",
+)
+```
+
+```{python}
+point_data = {}
+for name in POINTS_TO_COMPARE:
     try:
-        site_data[name] = load_site(name)
-    except Exception as e:  # e.g. a site outside its domain's grid
+        point_data[name] = load_point(name)
+    except Exception as e:  # e.g. a point outside its domain's grid
         print(f"skipping {name}: {type(e).__name__}: {e}")
 
-# One color per site, shared across every figure below.
+# One color per point, shared across every figure below.
 tab10 = plt.get_cmap("tab10")
-site_colors = {name: tab10(i) for i, name in enumerate(site_data)}
+point_colors = {name: tab10(i) for i, name in enumerate(point_data)}
 
-{name: df.shape for name, df in site_data.items()}
+{name: df.shape for name, df in point_data.items()}
 ```
 
-## Site KPIs
+## Point Key Metrics
 
-One row per site (@tbl-site-kpis), ranked by annual mean $J$. The annual energy
+One row per point (@tbl-point-kpis), ranked by annual mean $J$. The annual energy
 column is the resource per meter of wave front, mean $J$ integrated over the
 record. @fig-mean-vs-p95 sets the mean against the 95th percentile on one linear
 axis; the gap between them separates what a device earns from (the mean) and what
 it must survive (the tail).
 
 ```{python}
-#| label: tbl-site-kpis
-#| tbl-cap: "Site KPIs for the loaded year"
-# Sites ranked by annual mean J, richest first. Every figure below reuses this
+#| label: tbl-point-kpis
+#| tbl-cap: "Point Metrics for the loaded year (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+# Points ranked by annual mean J, richest first. Every figure below reuses this
 # order so the ranking is the same wherever you look.
-site_order = sorted(site_data, key=lambda n: site_data[n]["J"].mean(), reverse=True)
+point_order = sorted(point_data, key=lambda n: point_data[n]["J"].mean(), reverse=True)
 
 kpis = pd.DataFrame(
     {
-        WAVE_ENERGY_TEST_SITES[n]["label"]: {
-            "mean Hm0 [m]": site_data[n].Hm0.mean(),
-            "max Hm0 [m]": site_data[n].Hm0.max(),
-            "mean Te [s]": site_data[n].Te.mean(),
-            "mean J [kW/m]": site_data[n].J.mean(),
-            "p95 J [kW/m]": site_data[n].J.quantile(0.95),
-            "annual energy [MWh/m]": site_data[n].J.mean() * record_hours(site_data[n]) / 1000,
+        POINT_INFO[n]["label"]: {
+            "mean Hm0 [m]": point_data[n].Hm0.mean(),
+            "max Hm0 [m]": point_data[n].Hm0.max(),
+            "mean Te [s]": point_data[n].Te.mean(),
+            "mean J [kW/m]": point_data[n].J.mean(),
+            "p95 J [kW/m]": point_data[n].J.quantile(0.95),
+            "annual energy [MWh/m]": point_data[n].J.mean() * record_hours(point_data[n]) / 1000,
         }
-        for n in site_order
+        for n in point_order
     }
 ).T
-show_table(kpis.round(1))
+show_table(kpis.round(2))
 ```
 
 ```{python}
 #| label: fig-mean-vs-p95
-#| fig-cap: "Annual mean against 95th percentile omnidirectional wave energy flux ($J$) per site"
-annual_mean = pd.Series({n: site_data[n]["J"].mean() for n in site_order})
-annual_p95 = pd.Series({n: site_data[n]["J"].quantile(0.95) for n in site_order})
+#| fig-cap: "Annual mean against 95th percentile omnidirectional wave energy flux ($J$) per point (2020). Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+annual_mean = pd.Series({n: point_data[n]["J"].mean() for n in point_order})
+annual_p95 = pd.Series({n: point_data[n]["J"].quantile(0.95) for n in point_order})
 rank = annual_mean.sort_values().index  # ascending: richest at the top of the axis
 
 fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4.5))
 y = np.arange(len(rank))
 ax.hlines(y, annual_mean[rank], annual_p95[rank], color="0.75", linewidth=2, zorder=1)
 ax.scatter(annual_mean[rank], y, s=70, zorder=2,
-           color=[site_colors[n] for n in rank], label="annual mean")
+           color=[point_colors[n] for n in rank], label="annual mean")
 ax.scatter(annual_p95[rank], y, s=70, marker="D", facecolors="none", zorder=2,
-           edgecolors=[site_colors[n] for n in rank], label="95th percentile")
+           edgecolors=[point_colors[n] for n in rank], label="95th percentile")
 for i, n in enumerate(rank):
     for value in (annual_mean[n], annual_p95[n]):
         ax.annotate(f"{value:.0f}", (value, i), xytext=(0, 8),
                     textcoords="offset points", ha="center", size=7, color="0.25")
 ax.set_yticks(y)
-ax.set_yticklabels([WAVE_ENERGY_TEST_SITES[n]["label"] for n in rank])
+ax.set_yticklabels([POINT_INFO[n]["label"] for n in rank])
 ax.set_xlabel("$J$ [kW/m]")
 ax.margins(x=0.08, y=0.09)
 ax.legend(loc="lower right")
 fig.tight_layout()
-savefig("multisite_mean_vs_p95")
+savefig("multipoint_mean_vs_p95")
 ```
 
-## Moving averages
+## Moving Averages
 
-A centered moving average smooths storm-scale noise and exposes each site's
-seasonal cycle. The 7-day window (@fig-multisite-7d-hm0 through
-@fig-multisite-7d-j) still tracks individual storms; the 30-day window
-(@fig-multisite-30d-hm0 through @fig-multisite-30d-j) leaves the seasonal signal.
-Seasonality follows the storm tracks a site is exposed to, not its latitude.
+A centered moving average smooths storm-scale noise and exposes each point's
+seasonal cycle which is helpful for comparison between sites. The 7-day window (@fig-multipoint-7d-hm0 through
+@fig-multipoint-7d-j) still tracks individual storms; the 30-day window
+(@fig-multipoint-30d-hm0 through @fig-multipoint-30d-j) leaves the seasonal signal.
+Seasonality follows the storm tracks a point is exposed to, not its latitude.
 
 ```{python}
-def multisite_rolling(q, window, name):
-    """`window` centered moving average of `q`, one line per site."""
+def multipoint_rolling(q, window, name):
+    """`window` centered moving average of `q`, one line per point."""
     fig, ax = plt.subplots(figsize=(FIG_WIDTH, 4))
-    for site, df in site_data.items():
+    for point, df in point_data.items():
         roll = df[q].rolling(window, center=True, min_periods=1).mean()
-        ax.plot(roll.index, roll, color=site_colors[site],
-                label=WAVE_ENERGY_TEST_SITES[site]["label"], linewidth=1.5)
+        ax.plot(roll.index, roll, color=point_colors[point],
+                label=POINT_INFO[point]["label"], linewidth=1.5)
     ax.set(xlabel="Date", ylabel=QOIS[q])
     ax.margins(x=0)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
@@ -868,39 +1607,39 @@ def multisite_rolling(q, window, name):
 ```
 
 ```{python}
-#| label: fig-multisite-7d-hm0
-#| fig-cap: "7-day moving average of significant wave height ($H_{m0}$), all sites"
-multisite_rolling("Hm0", "7D", "multisite_7d_hm0")
+#| label: fig-multipoint-7d-hm0
+#| fig-cap: "7-day moving average (2020) of significant wave height ($H_{m0}$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("Hm0", "7D", "multipoint_7d_hm0")
 ```
 
 ```{python}
-#| label: fig-multisite-7d-te
-#| fig-cap: "7-day moving average of energy period ($T_e$), all sites"
-multisite_rolling("Te", "7D", "multisite_7d_te")
+#| label: fig-multipoint-7d-te
+#| fig-cap: "7-day moving average (2020) of energy period ($T_e$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("Te", "7D", "multipoint_7d_te")
 ```
 
 ```{python}
-#| label: fig-multisite-7d-j
-#| fig-cap: "7-day moving average of omnidirectional wave energy flux ($J$), all sites"
-multisite_rolling("J", "7D", "multisite_7d_j")
+#| label: fig-multipoint-7d-j
+#| fig-cap: "7-day moving average (2020) of omnidirectional wave energy flux ($J$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("J", "7D", "multipoint_7d_j")
 ```
 
 ```{python}
-#| label: fig-multisite-30d-hm0
-#| fig-cap: "30-day moving average of significant wave height ($H_{m0}$), all sites"
-multisite_rolling("Hm0", "30D", "multisite_30d_hm0")
+#| label: fig-multipoint-30d-hm0
+#| fig-cap: "30-day moving average (2020) of significant wave height ($H_{m0}$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("Hm0", "30D", "multipoint_30d_hm0")
 ```
 
 ```{python}
-#| label: fig-multisite-30d-te
-#| fig-cap: "30-day moving average of energy period ($T_e$), all sites"
-multisite_rolling("Te", "30D", "multisite_30d_te")
+#| label: fig-multipoint-30d-te
+#| fig-cap: "30-day moving average (2020) of energy period ($T_e$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("Te", "30D", "multipoint_30d_te")
 ```
 
 ```{python}
-#| label: fig-multisite-30d-j
-#| fig-cap: "30-day moving average of omnidirectional wave energy flux ($J$), all sites"
-multisite_rolling("J", "30D", "multisite_30d_j")
+#| label: fig-multipoint-30d-j
+#| fig-cap: "30-day moving average (2020) of omnidirectional wave energy flux ($J$), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
+multipoint_rolling("J", "30D", "multipoint_30d_j")
 ```
 
 # Environmental Contours: 1, 3 and 5 Year Records {#sec-contour-records}
@@ -908,57 +1647,73 @@ multisite_rolling("J", "30D", "multisite_30d_j")
 A 100-year contour extrapolated from one year of data asks a few thousand
 3-hour sea states to speak for a century. The size of that error is measurable.
 Refit the contour on more years and look at what moves. Here the 100-year PCA
-contour is refit per site on 1, 3 and 5 years of record.
+contour is refit per point on 1, 3 and 5 years of record.
 
-`load_site` takes a list of years, so a longer record is one query: the package
+`load_point` takes a list of years, so a longer record is one query: the package
 fetches the span in a single cached pull (five years times five variables still
 sits under the S3/API seam, so it stays on the free backend). Change
-`CONTOUR_YEARS` to widen or narrow the window.
+`CONTOUR_YEARS` in the configuration section to widen or narrow the window.
 
 ```{python}
-CONTOUR_YEARS = [2016, 2017, 2018, 2019, 2020]
-
-# Nested windows, all ending at YEAR: 1 -> [2020], 3 -> [2018..2020],
+# Nested windows, all ending at CONTOUR_YEARS[-1]: 1 -> [2020], 3 -> [2018..2020],
 # 5 -> [2016..2020]. Each is a superset of the one before, so any change between
 # them comes from added data and not from swapping which years are in play.
 YEAR_WINDOWS = {n: CONTOUR_YEARS[-n:] for n in (1, 3, 5)}
 
 
-def load_site_years(name, years=CONTOUR_YEARS):
-    """One site's sea states over a window of years, sliced from the full record.
+def load_point_years(name, years=CONTOUR_YEARS):
+    """One point's sea states over a window of years, sliced from the full record.
 
-    The full CONTOUR_YEARS record is fetched (and cached) once per site; every
+    The full CONTOUR_YEARS record is fetched (and cached) once per point; every
     window is a view of it, so widening the analysis costs no extra downloads.
+    Only CONTOUR_VARIABLES are pulled -- the contour fits read Hm0 and Te and
+    nothing else, so this stays a 2-variable request rather than an 8-variable one.
     """
-    df = load_site(name, years=CONTOUR_YEARS)
+    df = load_point(name, years=CONTOUR_YEARS, variables=CONTOUR_VARIABLES)
     return df[df.index.year.isin(years)]
 
 
-# Fitting a contour is the expensive step in this document; each fit is a pure
-# function of (site, years, method, return_period), so results are memoised to
+# Fitting a contour is the expensive step in this example; each fit is a pure
+# function of (point, years, method, return_period), so results are memoised to
 # .cache/contours/. Set FORCE_CONTOURS = True to recompute everything.
 FORCE_CONTOURS = False
 CONTOUR_CACHE_DIR = CACHE_DIR / "contours"
 
 
+# Per-point override of MHKiT's Hm0 bin width (`bin_val_size`, default 0.25).
+# A point with a narrow, depth-limited Hm0 range leaves the upper bins nearly
+# empty, and the fit through them goes singular (`LinAlgError`) -- a statement
+# about the bin defaults, not the ocean. Narrower bins keep the point fittable.
+# Points absent from this dict use MHKiT's default.
+CONTOUR_BIN_SIZE = {
+    "US_North_Carolina_Jenettes_Pier": 0.10,   # Atlantic; depth-limited at the pier
+}
+
+
 def contour(name, years, method="PCA", return_period=100, force=None):
-    """100-year (default) contour for one site+record, memoised to disk.
+    """100-year (default) contour for one point+record, memoised to disk.
 
     Returns a dict with 'x1' (Hm0) and 'x2' (Te), or both None if the fit does
     not converge.
     """
+    bin_val_size = CONTOUR_BIN_SIZE.get(name)
+
     def fit():
-        df = load_site_years(name, years=years)
+        df = load_point_years(name, years=years)
         dt = (df.index[1] - df.index[0]).total_seconds()
+        kwargs = {} if bin_val_size is None else {"bin_val_size": bin_val_size}
         try:
             cop = contours.environmental_contours(
-                df.Hm0, df.Te, dt, return_period, method=method)
+                df.Hm0, df.Te, dt, return_period, method=method, **kwargs)
             return {"x2": np.asarray(cop[f"{method}_x2"]),
                     "x1": np.asarray(cop[f"{method}_x1"])}
         except (np.linalg.LinAlgError, ValueError):
             return {"x2": None, "x1": None}
 
-    key = f"{name}__{years[0]}-{years[-1]}__{method}__{return_period}yr.pkl"
+    # The bin width goes in the cache key only when overridden, so existing
+    # default-binned pickles stay valid rather than all missing at once.
+    bin_key = "" if bin_val_size is None else f"__bin{bin_val_size}"
+    key = f"{name}__{years[0]}-{years[-1]}__{method}__{return_period}yr{bin_key}.pkl"
     return memoize_pickle(
         CONTOUR_CACHE_DIR / key, fit,
         force=FORCE_CONTOURS if force is None else force,
@@ -972,7 +1727,7 @@ def contour_peak(name, years, method="PCA", return_period=100):
 
 
 record = pd.Series(
-    {WAVE_ENERGY_TEST_SITES[n]["label"]: len(load_site_years(n)) for n in site_order},
+    {POINT_INFO[n]["label"]: len(load_point_years(n)) for n in point_order},
     name=f"sea states, {CONTOUR_YEARS[0]}–{CONTOUR_YEARS[-1]}",
 )
 print(record.to_string())
@@ -980,7 +1735,7 @@ print(record.to_string())
 
 ## The extreme against the length of the record
 
-For each site, the peak of the 100-year contour, the one number a designer takes
+For each point, the peak of the 100-year contour, the one number a designer takes
 away, is recomputed on 1, 3 and 5 years, each window a superset of the last
 (@fig-contour-peak-sweep). If a longer record simply refined the estimate, these
 lines would settle. They do not: within one to five years the estimate has not
@@ -989,20 +1744,20 @@ number quoted from one window without saying which window is not meaningful.
 
 ```{python}
 #| label: fig-contour-peak-sweep
-#| fig-cap: "Peak 100-year significant wave height ($H_{m0}$) against record length, all sites"
+#| fig-cap: "Peak 100-year significant wave height ($H_{m0}$) against record length (2016-2020), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 sweep = pd.DataFrame(
     {
-        WAVE_ENERGY_TEST_SITES[name]["label"]: {
+        POINT_INFO[name]["label"]: {
             n: contour_peak(name, years) for n, years in YEAR_WINDOWS.items()
         }
-        for name in site_order
+        for name in point_order
     }
 )
 
 fig, ax = plt.subplots(figsize=(FIG_WIDTH, 5.5))
-for name in site_order:
-    label = WAVE_ENERGY_TEST_SITES[name]["label"]
-    ax.plot(sweep.index, sweep[label], marker="o", color=site_colors[name],
+for name in point_order:
+    label = POINT_INFO[name]["label"]
+    ax.plot(sweep.index, sweep[label], marker="o", color=point_colors[name],
             linewidth=2, label=label)
 ax.set(xlabel=f"Years of record (each window ends at {CONTOUR_YEARS[-1]})",
        ylabel="Peak $H_{m0}$ of the 100-year contour [m]")
@@ -1019,38 +1774,38 @@ table["range [m]"] = (table.max(axis=1) - table.min(axis=1))
 print(table.round(2).to_string())
 ```
 
-The `range` column is the spread of answers a site gives depending only on how
+The `range` column is the spread of answers a point gives depending only on how
 many years were used, a choice that has nothing to do with the ocean.
 
 ## The contour at each record length
 
 The same result as curves (@fig-contour-1yr, @fig-contour-3yr, @fig-contour-5yr):
-every site's 100-year contour on one window per figure, on shared axes limits, so
+every point's 100-year contour on one window per figure, on shared axes limits, so
 following one color across the figures shows the shape moving, not just its peak.
 
 ```{python}
 # Fit (or read back) every window's contours once, and frame all three figures
 # to the same limits so they compare directly.
 window_contours = {
-    n: {name: contour(name, years) for name in site_order}
+    n: {name: contour(name, years) for name in point_order}
     for n, years in YEAR_WINDOWS.items()
 }
-_fitted = [c for by_site in window_contours.values()
-           for c in by_site.values() if c["x1"] is not None]
+_fitted = [c for by_point in window_contours.values()
+           for c in by_point.values() if c["x1"] is not None]
 te_max = max(np.nanmax(c["x2"]) for c in _fitted)
 hm0_max = max(np.nanmax(c["x1"]) for c in _fitted)
 
 
 def plot_window_contours(n):
-    """All sites' 100-year contours for one record-length window."""
+    """All points' 100-year contours for one record-length window."""
     years = YEAR_WINDOWS[n]
     fig, ax = plt.subplots(figsize=(FIG_WIDTH, 5))
-    for name in site_order:
+    for name in point_order:
         cop = window_contours[n][name]
         if cop["x1"] is None:
             continue
-        ax.plot(cop["x2"], cop["x1"], color=site_colors[name], linewidth=1.8,
-                label=WAVE_ENERGY_TEST_SITES[name]["label"])
+        ax.plot(cop["x2"], cop["x1"], color=point_colors[name], linewidth=1.8,
+                label=POINT_INFO[name]["label"])
     ax.set(xlim=(0, te_max * 1.05), ylim=(0, hm0_max * 1.08),
            xlabel="Energy Period, $T_e$ [s]",
            ylabel="Significant Wave Height, $H_{m0}$ [m]")
@@ -1062,19 +1817,19 @@ def plot_window_contours(n):
 
 ```{python}
 #| label: fig-contour-1yr
-#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 1-year record (2020), all sites"
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 1-year record (2020), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 plot_window_contours(1)
 ```
 
 ```{python}
 #| label: fig-contour-3yr
-#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 3-year record (2018-2020), all sites"
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 3-year record (2018-2020), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 plot_window_contours(3)
 ```
 
 ```{python}
 #| label: fig-contour-5yr
-#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 5-year record (2016-2020), all sites"
+#| fig-cap: "100-year contours ($H_{m0}$ vs $T_e$) from a 5-year record (2016-2020), all points. Data Source: Yang, Zhaoqing, Vince Neary, Levi Kilcher, and Mike Lawson. 2020. High Resolution Ocean Surface Wave Hindcast (US Wave) Data. Marine and Hydrokinetic Data Repository, National Renewable Energy Laboratory. <https://doi.org/10.15473/1647329>"
 plot_window_contours(5)
 ```
 
