@@ -23,16 +23,28 @@ that provides pre-downloaded data.
 
 Requires [uv](https://docs.astral.sh/uv/) and
 [Quarto](https://quarto.org/docs/get-started/), or open the repository in
-GitHub Codespaces, which installs both.
+GitHub Codespaces, which installs both and runs `make sync` for you. The PDF is
+produced by Typst, which ships inside Quarto, so no LaTeX install is needed
+anywhere.
 
 ```sh
-make sync    # build the environment and register the Jupyter kernel
-make render  # render the notebook and PDF
+make sync            # build the environment and register the Jupyter kernel
+make check-toolchain # confirm Quarto, Typst and the kernel are wired up
+make render          # render the notebook and PDF
 ```
 
-Run `make help` for the full list of targets. The first render downloads the
-sea state records and caches them under `~/.mer_wave_cache`; renders after that
-read from disk.
+Run `make help` for the full list of targets. The first render downloads the sea
+state records and caches them; renders after that read from disk. The cache
+lives under `~/.mer_wave_cache`, or wherever `MER_WAVE_CACHE_DIR` points — in a
+Codespace that is `/workspaces/.mer_wave_cache`, which survives a container
+rebuild so the download happens once. The size depends on which points are
+compared and over how many years, so the document measures it rather than
+guessing: see "What the Records Cost", which reports the per-point download and
+writes `.cache/download_statistics.json`. For the four default points over five
+years it comes to roughly 585 MB, most of it raw S3 chunks under `s3_chunks/`
+that distil into the much smaller per-point records (`US_*/`) later renders
+read. Points in the Atlantic domain cost far more, because that domain bundles
+about twenty times as many nodes into each chunk.
 
 No account or API key is needed. The document reads the published hindcast
 files on S3 anonymously. An API key from the
